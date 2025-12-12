@@ -9,6 +9,7 @@ jobs:
   release:
     permissions:
       contents: write
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -31,7 +32,7 @@ jobs:
           node-version: 'lts/*'
 
       - name: Install Rust stable
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
