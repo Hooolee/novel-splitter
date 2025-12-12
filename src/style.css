@@ -1,0 +1,78 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Default Theme: Dark (极简黑) - User liked this */
+  --bg-main: #000000;
+  --bg-sidebar: #09090b;      /* Zinc-950 */
+  
+  /* Text */
+  --text-main: #e4e4e7;       /* Zinc-200 */
+  --text-dim: #a1a1aa;        /* Zinc-400 */
+  --text-inverse: #000000;
+
+  /* Interaction / States */
+  --bg-hover: #27272a;        /* Zinc-800 */
+  --bg-active: #3f3f46;       /* Zinc-700 */
+  --bg-subtle: rgba(255, 255, 255, 0.05);
+  --bg-input: #18181b;        /* Zinc-900 */
+  
+  /* Borders */
+  --border-dim: #27272a;      /* Zinc-800 */
+  --border-subtle: rgba(255, 255, 255, 0.08);
+
+  /* Accent - White for Dark Mode */
+  --accent-primary: #ffffff;
+  --accent-text: #000000;
+}
+
+[data-theme="light"] {
+  /* Theme: Refined Light (Notion/Linear style with Green tint) */
+  --bg-main: #ffffff;
+  --bg-sidebar: #f7f7f5;      /* Warm/Notion grey sidebar */
+  
+  /* Text */
+  --text-main: #37352f;       /* Notion black */
+  --text-dim: #787774;        /* Notion grey */
+  --text-inverse: #ffffff;
+
+  /* Interaction / States */
+  --bg-hover: #ebebeb;        /* Light grey hover */
+  --bg-active: #e2e2e0;       /* Slightly darker grey */
+  --bg-subtle: rgba(0, 0, 0, 0.03);
+  --bg-input: #ffffff;        /* White input on grey background usually, or just white */
+  
+  /* Borders */
+  --border-dim: #e1e4e8;
+  --border-subtle: rgba(0, 0, 0, 0.05);
+
+  /* Accent - Green for Light Mode (Requested) */
+  --accent-primary: #16a34a;  /* Green-600 */
+  --accent-text: #ffffff;
+}
+
+/* Base styles */
+body {
+  background-color: var(--bg-main);
+  color: var(--text-main);
+  margin: 0;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  overflow: hidden;
+}
+
+/* Custom Scrollbar for Webkit */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: var(--bg-active);
+  border-radius: 3px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: var(--text-dim);
+}

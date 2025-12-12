@@ -1,0 +1,22 @@
+{
+    "$schema": "../gen/schemas/desktop-schema.json",
+    "identifier": "spider",
+    "description": "Capability for the spider worker window",
+    "windows": [
+        "spider_worker"
+    ],
+    "remote": {
+        "urls": [
+            "https://*.qidian.com/*",
+            "https://m.qidian.com/*",
+            "https://www.qidian.com/*",
+            "https://*.fanqienovel.com/*",
+            "https://fanqienovel.com/*"
+        ]
+    },
+    "permissions": [
+        "core:default",
+        "core:event:default",
+        "core:event:allow-emit"
+    ]
+}
