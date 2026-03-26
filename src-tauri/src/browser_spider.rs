@@ -102,15 +102,21 @@ pub async fn fetch_via_window(app: &AppHandle, url: &str, debug_visible: bool) -
         })();
     "#;
 
-    // Build window
-    // Note: We use 1x1 pixel or hidden
-    let window_builder = WebviewWindowBuilder::new(app, label, WebviewUrl::External(url.parse().map_err(|e: url::ParseError| e.to_string())?))
-        .title("Spider Worker")
-        .visible(debug_visible) 
-        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        .initialization_script(init_script);
+    // 105. Create or Reuse window
+    if let Some(w) = app.get_webview_window(label) {
+        println!("[Spider] Reusing existing window for {}", url);
+        w.navigate(url.parse().map_err(|e: url::ParseError| e.to_string())?)
+            .map_err(|e| format!("Failed to navigate window: {}", e))?;
+    } else {
+        println!("[Spider] Creating new window for {}", url);
+        let window_builder = WebviewWindowBuilder::new(app, label, WebviewUrl::External(url.parse().map_err(|e: url::ParseError| e.to_string())?))
+            .title("Spider Worker")
+            .visible(debug_visible) 
+            .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            .initialization_script(init_script);
 
-    let _window = window_builder.build().map_err(|e| format!("Failed to create window: {}", e))?;
+        let _window = window_builder.build().map_err(|e| format!("Failed to create window: {}", e))?;
+    }
 
     // Wait for result with timeout
     let result = tokio::select! {
@@ -124,10 +130,5 @@ pub async fn fetch_via_window(app: &AppHandle, url: &str, debug_visible: bool) -
         }
     };
     
-    // Cleanup window
-    if let Some(w) = app.get_webview_window(label) {
-        let _ = w.close();
-    }
-
     result
 }

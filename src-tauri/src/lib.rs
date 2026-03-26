@@ -1,11 +1,15 @@
 mod spiders;
 mod ai;
-mod browser_spider; // Expose browser spider
+mod browser_spider;
+mod scheduler;
+mod analysis_engine;
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
 use chrono::Local;
 
 // ... (Keep existing ai logic)
@@ -136,6 +140,97 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // 拦截关闭按钮，改为隐藏窗口
+                let _ = window.hide();
+                api.prevent_close();
+            }
+        })
+        .setup(|app| {
+            // 1. 创建托盘菜单
+            let quit_i = MenuItem::with_id(app, "quit", "退出应用", true, None::<&str>)?;
+            let show_i = MenuItem::with_id(app, "show", "显示主界面", true, None::<&str>)?;
+            let run_i = MenuItem::with_id(app, "run_now", "立即全量扫榜", true, None::<&str>)?;
+            
+            let tray_menu = Menu::with_items(app, &[
+                &show_i,
+                &run_i,
+                &quit_i,
+            ])?;
+
+            // 2. 创建托盘图标
+            let _tray = TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .menu(&tray_menu)
+                .on_menu_event(|app, event| {
+                    match event.id.as_ref() {
+                        "quit" => {
+                            std::process::exit(0);
+                        }
+                        "show" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        "run_now" => {
+                            let app_handle = app.clone();
+                            tauri::async_runtime::spawn(async move {
+                                println!("Manual trigger from tray: scan started");
+                                let config_path = std::path::PathBuf::from("/Users/a10763/codes/projects/muse/workflow_config.json");
+                                if let Ok(content) = std::fs::read_to_string(&config_path) {
+                                    if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
+                                        let ai_config = crate::ai::AiConfig {
+                                            api_base: config["ai"]["api_base"].as_str().unwrap_or_default().to_string(),
+                                            api_key: config["ai"]["api_key"].as_str().unwrap_or_default().to_string(),
+                                            model: config["ai"]["model"].as_str().unwrap_or_default().to_string(),
+                                        };
+                                        let workspace_root = std::path::Path::new("/Users/a10763/codes/projects/muse/novel-splitter");
+                                        let mut aggregated_report = format!("# 手动全量扫榜深度报告 ({})\n\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+
+                                        if let Some(rank_urls) = config["rank_urls"].as_array() {
+                                            println!("Manual: Found {} rank URLs to process.", rank_urls.len());
+                                            for rank_url_val in rank_urls {
+                                                if let Some(rank_url) = rank_url_val.as_str() {
+                                                    println!("Manual: Triggering analysis for {}", rank_url);
+                                                    match crate::analysis_engine::run_full_analysis_pipeline(
+                                                        &app_handle, rank_url, "qidian", ai_config.clone(), workspace_root
+                                                    ).await {
+                                                        Ok(partial) => {
+                                                            println!("Manual: Done for {}", rank_url);
+                                                            aggregated_report.push_str(&partial);
+                                                            aggregated_report.push_str("\n\n---\n\n");
+                                                        }
+                                                        Err(e) => {
+                                                            eprintln!("Manual: Pipeline failed for {}: {}", rank_url, e);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            eprintln!("Manual: 'rank_urls' not found or not an array in config.");
+                                        }
+                                        let reports_dir = workspace_root.join("reports");
+                                        let _ = std::fs::create_dir_all(&reports_dir);
+                                        let report_path = reports_dir.join(format!("manual_report_{}.md", chrono::Local::now().format("%Y%m%d_%H%M%S")));
+                                        let _ = std::fs::write(report_path, aggregated_report);
+                                        println!("Manual pipeline fully complete.");
+                                    }
+                                }
+                            });
+                        }
+                        _ => {}
+                    }
+                })
+                .build(app)?;
+
+            // 3. 初始化调度器
+            scheduler::init(app.handle().clone());
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             start_download,
             scan_and_download_rank,

@@ -3,7 +3,7 @@ use reqwest::Client;
 use tauri::Emitter;
 use futures::StreamExt;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct AiConfig {
     pub api_base: String,
     pub api_key: String,
@@ -156,4 +156,56 @@ pub async fn fetch_models(config: AiConfig) -> Result<Vec<String>, String> {
     }
     
     Err(format!("Unknown response format: {:?}", json))
+}
+
+pub async fn call_ai(
+    config: AiConfig,
+    prompt: String,
+    content: String,
+    response_json: bool,
+) -> Result<String, String> {
+    let client = Client::new();
+    let mut body = serde_json::json!({
+        "model": config.model,
+        "messages": [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": content}
+        ],
+        "temperature": 0.7
+    });
+
+    if response_json {
+        body["response_format"] = serde_json::json!({ "type": "json_object" });
+    }
+
+    let base = config.api_base.trim_end_matches('/');
+    let url = if base.ends_with("/chat/completions") {
+        base.to_string()
+    } else {
+        format!("{}/chat/completions", base)
+    };
+
+    let response = client.post(&url)
+        .header("Authorization", format!("Bearer {}", config.api_key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let err_text = response.text().await.unwrap_or_default();
+        return Err(format!("API Error {}: {}", status, err_text));
+    }
+
+    let json: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    let content = json.get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|s| s.as_str())
+        .ok_or_else(|| "Failed to get content from AI response".to_string())?;
+
+    Ok(content.to_string())
 }
