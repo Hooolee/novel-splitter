@@ -152,32 +152,58 @@ pub async fn run_full_analysis_pipeline(
                         novel.title, novel.rank, novel.rank_change));
                     report_segment.push_str(&format!("> **微观拆解 (缓存)**: {}\n\n", ai_report));
                 } else {
-                    // 没有缓存，走全量下载和 AI 分析
-                    println!("Pipeline: Cache miss for {}. Fetching chapters...", novel.title);
-                    match crate::spiders::qidian::fetch_chapter_list(app, &novel.url, false).await {
-                        Ok(chapters) => {
-                            let mut combined_content = String::new();
+                    let mut combined_content = String::new();
+                    let mut use_local = false;
+                    
+                    let safe_title = novel.title.replace("/", "_").replace("\\", "_");
+                    let novel_dir = workspace_root.join("downloads").join(&safe_title);
+                    
+                    if novel_dir.exists() {
+                        let mut local_count = 0;
+                        for i in 1..=3 {
+                            let filename = format!("{:02}.txt", i);
+                            let chapter_path = novel_dir.join(&filename);
+                            if let Ok(content) = std::fs::read_to_string(&chapter_path) {
+                                combined_content.push_str(&content);
+                                combined_content.push_str("\n\n");
+                                local_count += 1;
+                            }
+                        }
+                        if local_count >= 3 {
+                            use_local = true;
+                        }
+                    }
+
+                    if use_local {
+                        println!("Pipeline: Using locally cached chapters for {}...", novel.title);
+                    } else {
+                        combined_content.clear();
+                        println!("Pipeline: Cache miss for {}. Fetching chapters from network...", novel.title);
+                        if let Ok(chapters) = crate::spiders::qidian::fetch_chapter_list(app, &novel.url, false).await {
                             for (title, ch_url) in chapters.into_iter().take(3) {
                                 println!("  -> Downloading chapter: {}", title);
                                 if let Ok((_, content)) = crate::spiders::qidian::download_chapter(app, &ch_url, false).await {
                                     combined_content.push_str(&format!("## {}\n{}\n\n", title, content));
                                 }
                             }
+                        }
+                    }
 
-                            let prompt = r#"你是一个资深网文主编。请深度拆解这前三章正文：核心冲突点、金手指底层逻辑与限制、情绪节奏、章末勾子。精简回答。"#.to_string();
-                            println!("  -> Requesting AI analysis...");
-                            match crate::ai::call_ai(ai_config.clone(), prompt, combined_content, false).await {
-                                Ok(ai_report) => {
-                                    novel.ai_analysis = Some(serde_json::to_value(&ai_report).unwrap());
-                                    report_segment.push_str(&format!("### [{}]《{}》 (排名: {}, 变动: {})\n", 
-                                        if novel.is_new { "新上榜" } else { "稳坐" },
-                                        novel.title, novel.rank, novel.rank_change));
-                                    report_segment.push_str(&format!("> **微观拆解**: {}\n\n", ai_report));
-                                },
-                                Err(e) => eprintln!("  -> AI failed: {}", e),
-                            }
-                        },
-                        Err(e) => eprintln!("  -> Fetch chapters failed: {}", e),
+                    if !combined_content.is_empty() {
+                        let prompt = r#"你是一个资深网文主编。请深度拆解这前三章正文：核心冲突点、金手指底层逻辑与限制、情绪节奏、章末勾子。精简回答。"#.to_string();
+                        println!("  -> Requesting AI analysis...");
+                        match crate::ai::call_ai(ai_config.clone(), prompt, combined_content, false).await {
+                            Ok(ai_report) => {
+                                novel.ai_analysis = Some(serde_json::to_value(&ai_report).unwrap());
+                                report_segment.push_str(&format!("### [{}]《{}》 (排名: {}, 变动: {})\n", 
+                                    if novel.is_new { "新上榜" } else { "稳坐" },
+                                    novel.title, novel.rank, novel.rank_change));
+                                report_segment.push_str(&format!("> **微观拆解**: {}\n\n", ai_report));
+                            },
+                            Err(e) => eprintln!("  -> AI failed: {}", e),
+                        }
+                    } else {
+                        eprintln!("  -> Failed to obtain chapters for AI analysis.");
                     }
                 }
             },

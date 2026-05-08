@@ -135,6 +135,50 @@ fn get_auto_analysis_prompt() -> String {
 }"#.to_string()
 }
 
+#[tauri::command]
+fn list_reports(workspace_root: String) -> Result<Vec<String>, String> {
+    let mut files: Vec<String> = Vec::new();
+    
+    // 搜索工作目录下的 reports
+    let ws_reports = Path::new(&workspace_root).join("reports");
+    collect_report_files(&ws_reports, &mut files);
+    
+    // 同时搜索项目根目录下的 reports（可能不同于工作目录）
+    let project_reports = get_project_root().join("reports");
+    if project_reports != ws_reports {
+        collect_report_files(&project_reports, &mut files);
+    }
+    
+    files.sort();
+    files.dedup();
+    files.sort_by(|a, b| b.cmp(a)); // 最新的排前面
+    Ok(files)
+}
+
+fn collect_report_files(dir: &Path, files: &mut Vec<String>) {
+    if !dir.exists() { return; }
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.ends_with(".md") {
+                    files.push(name.to_string());
+                }
+            }
+        }
+    }
+}
+
+#[tauri::command]
+fn read_report(workspace_root: String, filename: String) -> Result<String, String> {
+    // 优先从工作目录读，找不到就从项目根目录读
+    let ws_path = Path::new(&workspace_root).join("reports").join(&filename);
+    if ws_path.exists() {
+        return fs::read_to_string(ws_path).map_err(|e| e.to_string());
+    }
+    let project_path = get_project_root().join("reports").join(&filename);
+    fs::read_to_string(project_path).map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -179,7 +223,8 @@ pub fn run() {
                             let app_handle = app.clone();
                             tauri::async_runtime::spawn(async move {
                                 println!("Manual trigger from tray: scan started");
-                                let config_path = std::path::PathBuf::from("/Users/a10763/codes/projects/muse/workflow_config.json");
+                                let project_root = get_project_root();
+                                let config_path = project_root.join("workflow_config.json");
                                 if let Ok(content) = std::fs::read_to_string(&config_path) {
                                     if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
                                         let ai_config = crate::ai::AiConfig {
@@ -187,7 +232,8 @@ pub fn run() {
                                             api_key: config["ai"]["api_key"].as_str().unwrap_or_default().to_string(),
                                             model: config["ai"]["model"].as_str().unwrap_or_default().to_string(),
                                         };
-                                        let workspace_root = std::path::Path::new("/Users/a10763/codes/projects/muse/novel-splitter");
+                                        let workspace_root_buf = project_root.clone();
+                                        let workspace_root = workspace_root_buf.as_path();
                                         let mut aggregated_report = format!("# 手动全量扫榜深度报告 ({})\n\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
 
                                         if let Some(rank_urls) = config["rank_urls"].as_array() {
@@ -243,9 +289,11 @@ pub fn run() {
             delete_novel,
             delete_chapter,
             export_chapter,
-            update_novel_metadata, // Register new command
+            update_novel_metadata,
             get_auto_analysis_prompt,
-            ensure_workspace_dirs
+            ensure_workspace_dirs,
+            list_reports,
+            read_report
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

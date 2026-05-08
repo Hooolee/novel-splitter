@@ -34,8 +34,8 @@ pub async fn stream_analysis(
     let mut body = serde_json::json!({
         "model": config.model,
         "messages": [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": content}
+            {"role": "system", "content": prompt.clone()},
+            {"role": "user", "content": content.clone()}
         ],
         "stream": true,
         "temperature": 0.7
@@ -54,6 +54,18 @@ pub async fn stream_analysis(
         format!("{}/chat/completions", base)
     };
 
+    let prompt_preview: String = prompt.chars().take(150).collect();
+    let content_preview: String = content.chars().take(100).collect();
+
+    // --- 新增详细日志打印 ---
+    println!("\\n==================== AI REQUEST LOG ====================");
+    println!("URL: {}", url);
+    println!("Model: {}", config.model);
+    println!("System Prompt (preview): {}...", prompt_preview);
+    println!("User Content (preview): {}...", content_preview);
+    println!("Response JSON required: {}", response_json);
+    println!("========================================================\\n");
+
     let _ = app.emit("ai-analysis-status", Progress {
         message: format!("Connecting to AI at {}...", url),
         status: "start".to_string()
@@ -70,23 +82,31 @@ pub async fn stream_analysis(
     if !response.status().is_success() {
         let status = response.status();
         let err_text = response.text().await.unwrap_or_default();
+        println!("API ERROR: {} - {}", status, err_text);
         return Err(format!("API Error {}: {}", status, err_text));
     }
 
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
+    let mut is_first = true;
 
     while let Some(item) = stream.next().await {
         let chunk = item.map_err(|e| e.to_string())?;
         let s = String::from_utf8_lossy(&chunk);
+        
+        if is_first {
+            println!("--- AI FIRST CHUNK RECEIVED ---");
+            println!("{}", s);
+            println!("-------------------------------");
+            is_first = false;
+        }
+
         buffer.push_str(&s);
 
         // Simple SSE parser
         // Look for "data: " lines. Handle split chunks by only processing full lines.
         while let Some(idx) = buffer.find('\n') {
             let line = buffer[..idx].to_string();
-            buffer.remove(0); // Remove leading chars... carefully. 
-            // Better: split off
             buffer = buffer[idx+1..].to_string();
             
             let trimmed = line.trim();
@@ -98,14 +118,28 @@ pub async fn stream_analysis(
                 
                 // Parse JSON
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                    // OpenAI format: choices[0].delta.content
+                    // OpenAI format: choices[0].delta
                     if let Some(delta) = json.get("choices").and_then(|c| c.get(0)).and_then(|c| c.get("delta")) {
-                         if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+                        let mut chunk_text = String::new();
+                        
+                        // DeepSeek-R1 reasoning content
+                        if let Some(reasoning) = delta.get("reasoning_content").and_then(|c| c.as_str()) {
+                            chunk_text.push_str(reasoning);
+                        }
+                        
+                        // Standard content
+                        if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+                            chunk_text.push_str(content);
+                        }
+
+                        if !chunk_text.is_empty() {
                             let _ = app.emit("ai-analysis", AiStreamPayload {
-                                chunk: content.to_string()
+                                chunk: chunk_text
                             });
-                         }
+                        }
                     } 
+                } else {
+                    println!("Warning: Failed to parse SSE JSON data chunk: {}", data);
                 }
             }
         }

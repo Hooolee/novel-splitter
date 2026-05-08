@@ -3,6 +3,15 @@ import { ref, onMounted, nextTick, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import { marked } from "marked";
+
+// 配置 marked：为标题生成 id
+const renderer = new marked.Renderer();
+renderer.heading = ({ text, depth }: { text: string; depth: number }) => {
+    const id = text.replace(/<[^>]*>/g, '').replace(/[^\w\u4e00-\u9fff]+/g, '-').replace(/^-|-$/g, '');
+    return `<h${depth} id="heading-${id}">${text}</h${depth}>`;
+};
+marked.setOptions({ renderer });
 
 // --- Workspace State ---
 // workspaceRoot is the user-selected base directory
@@ -18,7 +27,36 @@ const downloadsDir = computed(() => {
 
 // --- State ---
 const mode = ref<'single' | 'rank'>('single');
-const platform = ref('fanqie'); // NEW: Platform selection
+const platform = ref('fanqie');
+
+// --- Tab Navigation ---
+const activeTab = ref<'library' | 'reports' | 'download'>('library');
+
+// --- Reports State ---
+const reportFiles = ref<string[]>([]);
+const selectedReport = ref<string | null>(null);
+const reportContent = ref('');
+
+// 从报告内容中提取目录
+const reportToc = computed(() => {
+    if (!reportContent.value) return [];
+    const lines = reportContent.value.split('\n');
+    const toc: { level: number; text: string; id: string }[] = [];
+    for (const line of lines) {
+        const match = line.match(/^(#{1,3})\s+(.+)/);
+        if (match) {
+            const text = match[2].replace(/\*\*/g, '').trim();
+            const id = 'heading-' + text.replace(/[^\w\u4e00-\u9fff]+/g, '-').replace(/^-|-$/g, '');
+            toc.push({ level: match[1].length, text, id });
+        }
+    }
+    return toc;
+});
+
+function scrollToHeading(id: string) {
+    const el = document.getElementById(id);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
 
 // Single Mode Config
 const url = ref("");
@@ -220,6 +258,7 @@ onMounted(() => {
     }, 2000);
     
     refreshTreeFiles();
+    loadReportFiles();
 });
 
 async function startTask() {
@@ -560,30 +599,42 @@ async function autoAnalyze(novelName: string) {
             model: aiConfig.value.model,
             prompt: prompt,
             content: fullContent.substring(0, 15000), // Limit context
-            responseJson: true
+            responseJson: false // 禁用原生 json_object，避免某些代理层因为兼容问题直接返回空流
         });
         
         await waitForDone;
         unlisten(); // Stop listening
         
         // 4. Parse JSON
-        let jsonStr = capturedOutput;
-        // Try to extract JSON from code blocks if present
-        const jsonMatch = capturedOutput.match(/```json\n([\s\S]*?)\n```/) || capturedOutput.match(/```\n([\s\S]*?)\n```/);
+        let cleanedOutput = capturedOutput;
+        // 移除 <think> 标签及其内容 (适配 deepseek-r1 等思考模型)
+        cleanedOutput = cleanedOutput.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+
+        let jsonStr = cleanedOutput;
+        // 尝试从 markdown 代码块中提取
+        const jsonMatch = cleanedOutput.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
         if (jsonMatch) {
             jsonStr = jsonMatch[1];
         }
         
-        // 4. Parse JSON（更稳健的提取，避免 AI 返回额外文案导致解析失败）
+        // 更稳健的提取，避免 AI 返回额外文案导致解析失败
         const extractJson = (raw: string) => {
             try {
                 return JSON.parse(raw);
-            } catch (_) {
-                const match = raw.match(/\{[\s\S]*\}/);
-                if (match) {
-                    return JSON.parse(match[0]);
+            } catch (e1) {
+                try {
+                    // 尝试寻找最外层的 {}
+                    const firstBrace = raw.indexOf('{');
+                    const lastBrace = raw.lastIndexOf('}');
+                    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+                        const inner = raw.substring(firstBrace, lastBrace + 1);
+                        return JSON.parse(inner);
+                    }
+                } catch (e2) {
+                    console.error("Secondary JSON parse failed:", e2);
                 }
-                throw new Error("No valid JSON found");
+                console.error("Raw string that failed to parse:", raw);
+                throw new Error("No valid JSON found in response.\nRaw Output:\n" + raw.substring(0, 2000));
             }
         };
 
@@ -610,8 +661,9 @@ async function autoAnalyze(novelName: string) {
                 loadNovelMetadata(selectedFile.value || novelName); // Refresh
             }
             
-        } catch (e) {
+        } catch (e: any) {
             console.error("Failed to parse AI response:", e);
+            splitContent.value = "❌ 解析失败！AI 返回了不符合预期的格式。\n\n【原始返回内容截取】\n" + (e.message || e);
             downloadLog.value.push(`[System] Analysis failed: JSON parse error`);
         }
         
@@ -640,6 +692,54 @@ async function clearLogs() {
     }
 }
 
+// --- Reports ---
+async function loadReportFiles() {
+    if (!workspaceRoot.value) {
+        reportFiles.value = [];
+        return;
+    }
+    try {
+        reportFiles.value = await invoke("list_reports", {
+            workspaceRoot: workspaceRoot.value
+        }) as string[];
+    } catch (e) {
+        console.error("Failed to load reports:", e);
+        reportFiles.value = [];
+    }
+}
+
+async function selectReport(filename: string) {
+    selectedReport.value = filename;
+    currentMetadata.value = null;
+    fileContent.value = '';
+    splitContent.value = '';
+    try {
+        reportContent.value = await invoke("read_report", {
+            workspaceRoot: workspaceRoot.value,
+            filename: filename
+        }) as string;
+    } catch (e) {
+        reportContent.value = "读取报告失败: " + e;
+    }
+}
+
+function formatReportName(filename: string): string {
+    if (filename.startsWith('manual_report_')) {
+        const part = filename.replace('manual_report_', '').replace('.md', '');
+        const segments = part.split('_');
+        if (segments.length >= 2 && segments[0].length === 8) {
+            const d = segments[0];
+            const t = segments[1];
+            return `手动扫榜 ${d.slice(0,4)}-${d.slice(4,6)}-${d.slice(6,8)} ${t.slice(0,2)}:${t.slice(2,4)}`;
+        }
+        return `手动扫榜 ${part}`;
+    }
+    if (filename.startsWith('report_')) {
+        return `定时扫榜 ${filename.replace('report_', '').replace('.md', '')}`;
+    }
+    return filename.replace('.md', '');
+}
+
 </script>
 
 <template>
@@ -662,24 +762,16 @@ async function clearLogs() {
             </div>
         </div>
         
-        <!-- Mode Switcher (Segmented Control) -->
+        <!-- Tab Switcher -->
         <div class="bg-subtle p-1 rounded-lg flex mb-6 relative border border-border-dim">
-            <div 
-                class="absolute top-1 bottom-1 rounded-md bg-active border border-border-dim shadow-sm transition-all duration-300 ease-out"
-                :class="mode === 'single' ? 'left-1 w-[calc(50%-4px)]' : 'left-[calc(50%+2px)] w-[calc(50%-4px)]'"
-            ></div>
-            <button 
-                @click="mode = 'single'"
-                class="flex-1 relative z-10 text-xs font-medium py-1.5 text-center transition-colors duration-200"
-                :class="mode === 'single' ? 'text-txt' : 'text-txt-dim hover:text-txt'"
-            >单本下载</button>
-            <button 
-                @click="mode = 'rank'"
-                class="flex-1 relative z-10 text-xs font-medium py-1.5 text-center transition-colors duration-200"
-                :class="mode === 'rank' ? 'text-txt' : 'text-txt-dim hover:text-txt'"
-            >榜单监控</button>
+            <div class="absolute top-1 bottom-1 rounded-md bg-active border border-border-dim shadow-sm transition-all duration-300 ease-out" :style="{ left: activeTab === 'library' ? '4px' : activeTab === 'reports' ? 'calc(33.33% + 1px)' : 'calc(66.66% + 2px)', width: 'calc(33.33% - 5px)' }"></div>
+            <button @click="activeTab = 'library'" class="flex-1 relative z-10 text-xs font-medium py-1.5 text-center transition-colors duration-200" :class="activeTab === 'library' ? 'text-txt' : 'text-txt-dim hover:text-txt'">📚 书库</button>
+            <button @click="activeTab = 'reports'; loadReportFiles()" class="flex-1 relative z-10 text-xs font-medium py-1.5 text-center transition-colors duration-200" :class="activeTab === 'reports' ? 'text-txt' : 'text-txt-dim hover:text-txt'">📊 报告</button>
+            <button @click="activeTab = 'download'" class="flex-1 relative z-10 text-xs font-medium py-1.5 text-center transition-colors duration-200" :class="activeTab === 'download' ? 'text-txt' : 'text-txt-dim hover:text-txt'">⬇ 下载</button>
         </div>
 
+        <!-- ==================== 书库 Tab ==================== -->
+        <template v-if="activeTab === 'library'">
         <!-- Workspace Directory Selector -->
         <div class="mb-4 px-1">
             <div class="flex items-center justify-between mb-2">
@@ -834,6 +926,65 @@ async function clearLogs() {
             <span v-if="isSplitting" class="animate-spin text-lg">⏳</span>
             <span v-else class="text-sm">⚡️ 开始拆书</span>
         </button>
+        </template>
+
+        <!-- ==================== 报告 Tab ==================== -->
+        <template v-if="activeTab === 'reports'">
+        <div class="flex items-center justify-between mb-3 px-1">
+            <span class="text-[11px] font-bold text-txt-dim uppercase tracking-wider">扫榜报告</span>
+            <button @click="loadReportFiles" class="text-txt-dim hover:text-txt transition-colors p-1 rounded hover:bg-subtle" title="刷新">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" /></svg>
+            </button>
+        </div>
+        <div class="flex-1 bg-subtle rounded-xl border border-border-dim overflow-y-auto mb-4 select-none p-2 space-y-1 custom-scrollbar">
+            <div v-if="reportFiles.length === 0" class="flex flex-col items-center justify-center h-full text-txt-dim text-xs gap-3">
+                <div class="w-12 h-12 rounded-full bg-subtle flex items-center justify-center"><span class="text-2xl opacity-30">📊</span></div>
+                <div class="text-center opacity-50">暂无报告<br>可通过系统托盘触发扫榜</div>
+            </div>
+            <div v-for="file in reportFiles" :key="file" @click="selectReport(file)"
+                class="px-3 py-2.5 rounded-lg cursor-pointer transition-all duration-200 border flex items-center gap-3"
+                :class="selectedReport === file ? 'bg-gradient-to-r from-accent/10 to-transparent border-l-2 border-l-accent border-transparent' : 'hover:bg-hover border-l-2 border-l-transparent border-transparent text-txt-dim hover:text-txt'"
+            >
+                <span class="text-lg">📊</span>
+                <div class="flex-1 min-w-0">
+                    <div class="truncate font-medium text-[12px]">{{ formatReportName(file) }}</div>
+                    <div class="text-[10px] opacity-40 truncate">{{ file }}</div>
+                </div>
+            </div>
+        </div>
+        </template>
+
+        <!-- ==================== 下载 Tab ==================== -->
+        <template v-if="activeTab === 'download'">
+        <div class="space-y-4 px-1 flex-1 overflow-y-auto">
+            <div class="flex flex-col gap-1">
+                <label class="text-xs text-gray-400">平台</label>
+                <select v-model="platform" class="bg-input border border-border rounded px-2 py-2 text-sm focus:border-accent outline-none appearance-none">
+                    <option value="fanqie">🍅 番茄小说</option>
+                    <option value="qidian">📖 起点中文网</option>
+                </select>
+            </div>
+            <div class="flex flex-col gap-1">
+                <label class="text-xs text-gray-400">下载模式</label>
+                <div class="flex gap-2">
+                    <button @click="mode = 'single'" class="flex-1 py-1.5 text-xs rounded-md border transition-all" :class="mode === 'single' ? 'bg-accent/20 border-accent text-accent' : 'border-border-dim text-txt-dim hover:text-txt'">单本</button>
+                    <button @click="mode = 'rank'" class="flex-1 py-1.5 text-xs rounded-md border transition-all" :class="mode === 'rank' ? 'bg-accent/20 border-accent text-accent' : 'border-border-dim text-txt-dim hover:text-txt'">榜单</button>
+                </div>
+            </div>
+            <template v-if="mode === 'single'">
+                <div class="flex flex-col gap-1"><label class="text-xs text-gray-400">小说主页链接</label><input v-model="url" type="text" class="bg-input border border-border rounded px-3 py-2 text-sm focus:border-accent outline-none"></div>
+                <div class="flex flex-col gap-1"><label class="text-xs text-gray-400">抓取章数</label><input v-model="count" type="number" class="bg-input border border-border rounded px-3 py-2 text-sm focus:border-accent outline-none"></div>
+            </template>
+            <template v-else>
+                <div class="flex flex-col gap-1"><label class="text-xs text-gray-400">榜单链接</label><input v-model="rankUrl" type="text" class="bg-input border border-border rounded px-3 py-2 text-sm focus:border-accent outline-none"></div>
+                <div class="flex flex-col gap-1"><label class="text-xs text-gray-400">抓取本数</label><input v-model="rankCount" type="number" min="1" class="bg-input border border-border rounded px-3 py-2 text-sm focus:border-accent outline-none"></div>
+                <div class="flex flex-col gap-1"><label class="text-xs text-gray-400">每本章数</label><input v-model="rankChapterCount" type="number" class="bg-input border border-border rounded px-3 py-2 text-sm focus:border-accent outline-none"></div>
+            </template>
+            <button @click="startTask" :disabled="isDownloading || !workspaceRoot" class="w-full bg-accent text-[var(--accent-text)] font-bold px-4 py-2.5 rounded-lg hover:opacity-90 text-xs disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
+                {{ isDownloading ? '⬇ 运行中...' : (mode === 'single' ? '⬇ 开始下载' : '🚀 扫榜下载') }}
+            </button>
+        </div>
+        </template>
 
         <div class="mt-auto pt-4 border-t border-border-dim flex justify-between items-center group/settings">
             <span class="text-[10px] text-txt-dim group-hover/settings:text-txt transition-colors">SETTINGS</span>
@@ -855,53 +1006,30 @@ async function clearLogs() {
 
     <!-- Main Content -->
     <div class="flex-1 flex flex-col p-4 gap-4 overflow-hidden">
-        
-        <!-- Top Config Panel -->
-        <div class="bg-sidebar p-4 rounded-lg flex gap-4 items-end shadow-sm flex-shrink-0 transition-all">
-            <div class="flex flex-col gap-1 w-28">
-                <label class="text-xs text-gray-400">平台</label>
-                <select v-model="platform" class="bg-input border border-border rounded px-2 py-2 text-sm focus:border-accent outline-none appearance-none">
-                    <option value="fanqie">🍅 番茄小说</option>
-                    <option value="qidian">📖 起点中文网</option>
-                </select>
+
+        <!-- ===== 报告全屏视图 ===== -->
+        <div v-if="selectedReport && activeTab === 'reports'" class="flex-1 bg-card rounded-lg border border-border flex overflow-hidden">
+            <!-- 左侧目录 -->
+            <div v-if="reportToc.length > 0" class="w-56 flex-shrink-0 border-r border-border flex flex-col">
+                <div class="bg-white/5 px-3 py-2 border-b border-border text-xs font-bold text-txt-dim uppercase tracking-wider">📑 目录</div>
+                <div class="flex-1 overflow-y-auto p-2 space-y-0.5">
+                    <div v-for="item in reportToc" :key="item.id" @click="scrollToHeading(item.id)"
+                        class="cursor-pointer text-[11px] py-1 px-2 rounded hover:bg-white/5 text-txt-dim hover:text-txt transition-colors truncate"
+                        :style="{ paddingLeft: (item.level - 1) * 12 + 8 + 'px' }"
+                    >{{ item.text }}</div>
+                </div>
             </div>
-
-            <template v-if="mode === 'single'">
-                <div class="flex flex-col gap-1 flex-1">
-                    <label class="text-xs text-gray-400">小说主页链接</label>
-                    <input v-model="url" type="text" class="bg-input border border-border rounded px-3 py-2 text-sm focus:border-accent outline-none">
+            <!-- 右侧报告内容 -->
+            <div class="flex-1 flex flex-col overflow-hidden">
+                <div class="bg-white/5 px-4 py-2 border-b border-border flex justify-between items-center text-sm font-bold">
+                    <span>📊 {{ formatReportName(selectedReport) }}</span>
+                    <button @click="selectedReport = null; reportContent = ''" class="text-txt-dim hover:text-txt text-xs">✕ 关闭</button>
                 </div>
-                <div class="flex flex-col gap-1 w-24">
-                    <label class="text-xs text-gray-400">抓取章数</label>
-                    <input v-model="count" type="number" class="bg-input border border-border rounded px-3 py-2 text-sm focus:border-accent outline-none">
-                </div>
-            </template>
-
-            <template v-else>
-                 <div class="flex flex-col gap-1 flex-1">
-                    <label class="text-xs text-gray-400">榜单链接</label>
-                    <input v-model="rankUrl" type="text" class="bg-input border border-border rounded px-3 py-2 text-sm focus:border-accent outline-none">
-                </div>
-                <div class="flex flex-col gap-1 w-20">
-                    <label class="text-xs text-gray-400">抓取本数</label>
-                    <input v-model="rankCount" type="number" class="bg-input border border-border rounded px-3 py-2 text-sm focus:border-accent outline-none" min="1">
-                </div>
-                <div class="flex flex-col gap-1 w-20">
-                    <label class="text-xs text-gray-400">每本章数</label>
-                    <input v-model="rankChapterCount" type="number" class="bg-input border border-border rounded px-3 py-2 text-sm focus:border-accent outline-none">
-                </div>
-            </template>
-
-            <button
-                @click="startTask"
-                :disabled="isDownloading || !workspaceRoot"
-                class="bg-accent text-[var(--accent-text)] font-bold px-4 py-2 rounded hover:opacity-90 h-[34px] text-xs disabled:opacity-50 disabled:cursor-not-allowed min-w-[100px] flex items-center justify-center"
-            >
-                {{ isDownloading ? '⬇ 运行中...' : (mode === 'single' ? '⬇ 开始下载' : '🚀 扫榜') }}
-            </button>
+                <div class="flex-1 p-6 overflow-y-auto prose prose-invert prose-sm max-w-none" v-html="marked(reportContent || '')"></div>
+            </div>
         </div>
-
-        <!-- Split View Area -->
+        <!-- ===== 书库/分析 分栏视图 ===== -->
+        <template v-if="!(selectedReport && activeTab === 'reports')">
         <div class="flex-1 grid grid-cols-2 gap-4 min-h-0">
             <!-- Left: Original Content / Metadata View -->
             <div class="bg-card rounded-lg border border-border flex flex-col overflow-hidden">
@@ -910,49 +1038,43 @@ async function clearLogs() {
                     <span class="font-normal text-gray-500 text-xs">{{ selectedFile || '请在左侧选择' }}</span>
                 </div>
                 
-                <!-- Metadata Card View -->
-                 <div v-if="currentMetadata" class="flex-1 p-8 overflow-y-auto flex flex-col items-center justify-center text-center">
-                     <div class="text-6xl mb-4">📚</div>
-                     <h2 class="text-2xl font-bold text-accent mb-2">{{ currentMetadata.title }}</h2>
-                     <div class="text-sm text-txt-dim mb-4">{{ currentMetadata.word_count }}</div>
-                     
-                     <div class="flex flex-wrap gap-2 justify-center mb-6">
-                         <span v-for="tag in currentMetadata.tags" :key="tag" class="px-2 py-1 bg-subtle border border-border-dim rounded text-xs text-txt-dim">
-                             {{ tag }}
-                         </span>
+                <!-- Metadata Card View (Enhanced) -->
+                 <div v-if="currentMetadata" class="flex-1 p-6 overflow-y-auto">
+                     <div class="text-center mb-6">
+                         <div class="text-5xl mb-3">📚</div>
+                         <h2 class="text-xl font-bold text-accent mb-1">{{ currentMetadata.title }}</h2>
+                         <div class="text-xs text-txt-dim">{{ currentMetadata.word_count }}</div>
                      </div>
                      
-                     <div class="bg-subtle p-4 rounded-lg text-left w-full border border-border-dim max-w-md">
-                         <div class="text-xs text-txt-dim mb-2 uppercase tracking-wider">Introduction</div>
+                     <div class="flex flex-wrap gap-1.5 justify-center mb-5">
+                         <span v-for="tag in currentMetadata.tags" :key="tag" class="px-2 py-0.5 bg-subtle border border-border-dim rounded text-[11px] text-txt-dim">{{ tag }}</span>
+                     </div>
+
+                     <!-- AI 操作按钮组 -->
+                     <div class="flex gap-2 mb-5">
+                         <button @click="autoAnalyze(currentMetadata.title)" :disabled="isSplitting || !aiConfig.apiKey" class="flex-1 py-2 text-xs rounded-lg border border-accent/30 text-accent hover:bg-accent/10 transition-all disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-1.5">
+                             <span>🔍</span> 商业分析
+                         </button>
+                         <button @click="() => { if(selectedFile) startSplit(); }" :disabled="!selectedFile || isSplitting || !aiConfig.apiKey" class="flex-1 py-2 text-xs rounded-lg border border-blue-400/30 text-blue-400 hover:bg-blue-400/10 transition-all disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-1.5">
+                             <span>📖</span> 深度拆解
+                         </button>
+                     </div>
+                     
+                     <div class="bg-subtle p-4 rounded-lg text-left w-full border border-border-dim">
+                         <div class="text-xs text-txt-dim mb-2 uppercase tracking-wider">简介</div>
                          <p class="text-sm leading-relaxed text-txt whitespace-pre-wrap">{{ currentMetadata.description }}</p>
 
                          <!-- AI Analysis Section -->
-                         <div v-if="currentMetadata.ai_analysis" class="mt-6 pt-6 border-t border-border-dim">
+                         <div v-if="currentMetadata.ai_analysis" class="mt-5 pt-5 border-t border-border-dim">
                             <div class="text-xs text-accent mb-3 uppercase tracking-wider font-bold flex items-center gap-1">
                                 <span>🤖 AI 深度分析</span>
                             </div>
-                            
-                            <div class="space-y-3 text-xs">
-                                <div class="grid grid-cols-[60px_1fr] gap-2">
-                                    <span class="text-txt-dim">题材</span>
-                                    <span class="text-txt font-medium">{{ currentMetadata.ai_analysis.genre }}</span>
-                                </div>
-                                <div class="grid grid-cols-[60px_1fr] gap-2">
-                                    <span class="text-txt-dim">风格</span>
-                                    <span class="text-txt font-medium">{{ currentMetadata.ai_analysis.style }}</span>
-                                </div>
-                                <div class="grid grid-cols-[60px_1fr] gap-2">
-                                    <span class="text-txt-dim">金手指</span>
-                                    <span class="text-txt font-medium">{{ currentMetadata.ai_analysis.goldfinger }}</span>
-                                </div>
-                                <div class="space-y-1">
-                                    <span class="text-txt-dim block">故事开头</span>
-                                    <p class="text-txt leading-relaxed opacity-90">{{ currentMetadata.ai_analysis.opening }}</p>
-                                </div>
-                                <div class="space-y-1">
-                                    <span class="text-txt-dim block">核心看点</span>
-                                    <p class="text-txt leading-relaxed opacity-90">{{ currentMetadata.ai_analysis.highlights }}</p>
-                                </div>
+                            <div class="space-y-2.5 text-xs">
+                                <div class="grid grid-cols-[60px_1fr] gap-2"><span class="text-txt-dim">题材</span><span class="text-txt font-medium">{{ currentMetadata.ai_analysis.genre }}</span></div>
+                                <div class="grid grid-cols-[60px_1fr] gap-2"><span class="text-txt-dim">风格</span><span class="text-txt font-medium">{{ currentMetadata.ai_analysis.style }}</span></div>
+                                <div class="grid grid-cols-[60px_1fr] gap-2"><span class="text-txt-dim">金手指</span><span class="text-txt font-medium">{{ currentMetadata.ai_analysis.goldfinger }}</span></div>
+                                <div class="space-y-1"><span class="text-txt-dim block">故事开头</span><p class="text-txt leading-relaxed opacity-90">{{ currentMetadata.ai_analysis.opening }}</p></div>
+                                <div class="space-y-1"><span class="text-txt-dim block">核心看点</span><p class="text-txt leading-relaxed opacity-90">{{ currentMetadata.ai_analysis.highlights }}</p></div>
                             </div>
                          </div>
                      </div>
@@ -977,6 +1099,7 @@ async function clearLogs() {
                 </div>
             </div>
         </div>
+        </template>
 
         <!-- Log / Progress Footer -->
         <div class="h-8 bg-sidebar rounded flex items-center px-4 gap-4 text-xs text-gray-400 flex-shrink-0">
@@ -1124,4 +1247,24 @@ async function clearLogs() {
 .bg-active {
     background-color: var(--active-bg);
 }
+
+/* Markdown 报告渲染样式 */
+:deep(.prose) h1, :deep(.prose) h2, :deep(.prose) h3 {
+    color: var(--accent-color, #f97316);
+    margin-top: 1.2em;
+    margin-bottom: 0.5em;
+    font-weight: 700;
+}
+:deep(.prose) h1 { font-size: 1.5em; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 0.3em; }
+:deep(.prose) h2 { font-size: 1.25em; }
+:deep(.prose) h3 { font-size: 1.1em; }
+:deep(.prose) p { margin: 0.6em 0; line-height: 1.7; color: var(--txt-color, #e5e5e5); font-size: 0.875rem; }
+:deep(.prose) ul, :deep(.prose) ol { padding-left: 1.5em; margin: 0.5em 0; }
+:deep(.prose) li { margin: 0.3em 0; font-size: 0.875rem; line-height: 1.6; color: var(--txt-color, #d4d4d4); }
+:deep(.prose) blockquote { border-left: 3px solid var(--accent-color, #f97316); padding: 0.5em 1em; margin: 0.8em 0; background: rgba(255,255,255,0.03); border-radius: 0 8px 8px 0; }
+:deep(.prose) blockquote p { margin: 0.2em 0; }
+:deep(.prose) hr { border-color: rgba(255,255,255,0.08); margin: 1.5em 0; }
+:deep(.prose) strong { color: #fff; }
+:deep(.prose) a { color: var(--accent-color, #f97316); text-decoration: underline; }
+:deep(.prose) code { background: rgba(255,255,255,0.08); padding: 0.15em 0.4em; border-radius: 4px; font-size: 0.85em; }
 </style>

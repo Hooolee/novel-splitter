@@ -14,8 +14,8 @@ pub fn init(app_handle: AppHandle) {
             let current_time = now.format("%H:%M").to_string();
             
             // 1. 尝试加载配置 (通常放在工作区根目录)
-            // 这里我们预设一个路径，或者从 AppHandle 拿到当前工作区
-            let config_path = std::path::PathBuf::from("/Users/a10763/codes/projects/muse/workflow_config.json");
+            let project_root = crate::get_project_root();
+            let config_path = project_root.join("workflow_config.json");
             
             if let Ok(content) = std::fs::read_to_string(&config_path) {
                 if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
@@ -30,7 +30,8 @@ pub fn init(app_handle: AppHandle) {
                             api_key: config["ai"]["api_key"].as_str().unwrap_or_default().to_string(),
                             model: config["ai"]["model"].as_str().unwrap_or_default().to_string(),
                         };
-                        let workspace_root = std::path::Path::new("/Users/a10763/codes/projects/muse/novel-splitter");
+                        let workspace_root_buf = project_root.clone();
+                        let workspace_root = workspace_root_buf.as_path();
                         let mut aggregated_report = format!("# 今日多维度网文题材深度报告 ({})\n\n", Local::now().format("%Y-%m-%d"));
 
                         if let Some(rank_urls) = config["rank_urls"].as_array() {
@@ -60,7 +61,7 @@ pub fn init(app_handle: AppHandle) {
                         let reports_dir = workspace_root.join("reports");
                         let _ = std::fs::create_dir_all(&reports_dir);
                         let report_path = reports_dir.join(format!("report_{}.md", Local::now().format("%Y-%m-%d")));
-                        let _ = std::fs::write(report_path, aggregated_report);
+                        let _ = std::fs::write(&report_path, aggregated_report);
                         println!("Scheduler: Final report generated at {:?}", report_path);
                     }
                 }
