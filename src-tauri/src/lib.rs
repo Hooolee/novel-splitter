@@ -3,6 +3,7 @@ mod ai;
 mod browser_spider;
 mod scheduler;
 mod analysis_engine;
+pub mod db;
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -179,6 +180,117 @@ fn read_report(workspace_root: String, filename: String) -> Result<String, Strin
     fs::read_to_string(project_path).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn trigger_full_scan(app: tauri::AppHandle, target_url: Option<String>, platform: Option<String>) -> Result<(), String> {
+    // 异步执行，不阻塞前端
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = trigger_full_scan_internal(&app_clone, target_url, platform).await;
+    });
+    Ok(())
+}
+
+async fn trigger_full_scan_internal(app_handle: &tauri::AppHandle, target_url: Option<String>, platform_opt: Option<String>) -> Result<(), String> {
+    println!("Manual trigger from frontend/tray: scan started");
+    let project_root = get_project_root();
+    let config_path = project_root.join("workflow_config.json");
+    
+    let content = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+    let config = serde_json::from_str::<serde_json::Value>(&content).map_err(|e| e.to_string())?;
+    
+    let ai_config = crate::ai::AiConfig {
+        api_base: config["ai"]["api_base"].as_str().unwrap_or_default().to_string(),
+        api_key: config["ai"]["api_key"].as_str().unwrap_or_default().to_string(),
+        model: config["ai"]["model"].as_str().unwrap_or_default().to_string(),
+    };
+    let workspace_root_buf = project_root.clone();
+    let workspace_root = workspace_root_buf.as_path();
+    let mut aggregated_report = format!("# 手动全量扫榜深度报告 ({})\n\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+
+    if let Some(target) = target_url {
+        let platform = platform_opt.unwrap_or_else(|| {
+            if target.contains("fanqie") { "fanqie".to_string() } else { "qidian".to_string() }
+        });
+        println!("Manual: Triggering analysis for specific target {} on platform {}", target, platform);
+        match crate::analysis_engine::run_full_analysis_pipeline(
+            app_handle, &target, &platform, ai_config.clone(), workspace_root
+        ).await {
+            Ok(partial) => {
+                aggregated_report.push_str(&partial);
+                aggregated_report.push_str("\n\n---\n\n");
+            }
+            Err(e) => eprintln!("Manual: Pipeline failed for {}: {}", target, e),
+        }
+    } else {
+        if let Some(rank_urls) = config["rank_urls"].as_array() {
+            println!("Manual: Found {} rank URLs to process.", rank_urls.len());
+            for rank_url_val in rank_urls {
+                if let Some(rank_url) = rank_url_val.as_str() {
+                    let platform = if rank_url.contains("fanqie") { "fanqie" } else { "qidian" };
+                    println!("Manual: Triggering analysis for {}", rank_url);
+                    match crate::analysis_engine::run_full_analysis_pipeline(
+                        app_handle, rank_url, platform, ai_config.clone(), workspace_root
+                    ).await {
+                        Ok(partial) => {
+                            println!("Manual: Done for {}", rank_url);
+                            aggregated_report.push_str(&partial);
+                            aggregated_report.push_str("\n\n---\n\n");
+                        }
+                        Err(e) => {
+                            eprintln!("Manual: Pipeline failed for {}: {}", rank_url, e);
+                        }
+                    }
+                }
+            }
+        } else {
+            eprintln!("Manual: 'rank_urls' not found or not an array in config.");
+            return Err("No rank URLs found in config".to_string());
+        }
+    }
+    
+    let reports_dir = workspace_root.join("reports");
+    let _ = std::fs::create_dir_all(&reports_dir);
+    let report_path = reports_dir.join(format!("manual_report_{}.md", chrono::Local::now().format("%Y%m%d_%H%M%S")));
+    let _ = std::fs::write(report_path, aggregated_report);
+    println!("Manual pipeline fully complete.");
+    
+    // 发送事件通知前端更新列表
+    let _ = app_handle.emit("report-generated", ());
+    
+    Ok(())
+}
+
+#[tauri::command]
+async fn update_ai_config(api_base: String, api_key: String, model: String) -> Result<(), String> {
+    let project_root = get_project_root();
+    let config_path = project_root.join("workflow_config.json");
+    
+    let mut config = if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+        serde_json::from_str::<serde_json::Value>(&content).unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    if !config.is_object() {
+        config = serde_json::json!({});
+    }
+
+    if config.get("ai").is_none() {
+        config["ai"] = serde_json::json!({});
+    }
+
+    config["ai"]["api_base"] = serde_json::Value::String(api_base);
+    config["ai"]["api_key"] = serde_json::Value::String(api_key);
+    config["ai"]["model"] = serde_json::Value::String(model);
+
+    let content = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    std::fs::write(&config_path, content).map_err(|e| e.to_string())?;
+    
+    println!("Updated AI config in workflow_config.json");
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -193,6 +305,14 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            // 0. 初始化数据库
+            let project_root = get_project_root();
+            let db_path = project_root.join("novel_intelligence.db");
+            match db::init_db(&db_path) {
+                Ok(_) => println!("Database initialized at {:?}", db_path),
+                Err(e) => eprintln!("Failed to initialize database: {}", e),
+            }
+
             // 1. 创建托盘菜单
             let quit_i = MenuItem::with_id(app, "quit", "退出应用", true, None::<&str>)?;
             let show_i = MenuItem::with_id(app, "show", "显示主界面", true, None::<&str>)?;
@@ -222,49 +342,7 @@ pub fn run() {
                         "run_now" => {
                             let app_handle = app.clone();
                             tauri::async_runtime::spawn(async move {
-                                println!("Manual trigger from tray: scan started");
-                                let project_root = get_project_root();
-                                let config_path = project_root.join("workflow_config.json");
-                                if let Ok(content) = std::fs::read_to_string(&config_path) {
-                                    if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
-                                        let ai_config = crate::ai::AiConfig {
-                                            api_base: config["ai"]["api_base"].as_str().unwrap_or_default().to_string(),
-                                            api_key: config["ai"]["api_key"].as_str().unwrap_or_default().to_string(),
-                                            model: config["ai"]["model"].as_str().unwrap_or_default().to_string(),
-                                        };
-                                        let workspace_root_buf = project_root.clone();
-                                        let workspace_root = workspace_root_buf.as_path();
-                                        let mut aggregated_report = format!("# 手动全量扫榜深度报告 ({})\n\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
-
-                                        if let Some(rank_urls) = config["rank_urls"].as_array() {
-                                            println!("Manual: Found {} rank URLs to process.", rank_urls.len());
-                                            for rank_url_val in rank_urls {
-                                                if let Some(rank_url) = rank_url_val.as_str() {
-                                                    println!("Manual: Triggering analysis for {}", rank_url);
-                                                    match crate::analysis_engine::run_full_analysis_pipeline(
-                                                        &app_handle, rank_url, "qidian", ai_config.clone(), workspace_root
-                                                    ).await {
-                                                        Ok(partial) => {
-                                                            println!("Manual: Done for {}", rank_url);
-                                                            aggregated_report.push_str(&partial);
-                                                            aggregated_report.push_str("\n\n---\n\n");
-                                                        }
-                                                        Err(e) => {
-                                                            eprintln!("Manual: Pipeline failed for {}: {}", rank_url, e);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        } else {
-                                            eprintln!("Manual: 'rank_urls' not found or not an array in config.");
-                                        }
-                                        let reports_dir = workspace_root.join("reports");
-                                        let _ = std::fs::create_dir_all(&reports_dir);
-                                        let report_path = reports_dir.join(format!("manual_report_{}.md", chrono::Local::now().format("%Y%m%d_%H%M%S")));
-                                        let _ = std::fs::write(report_path, aggregated_report);
-                                        println!("Manual pipeline fully complete.");
-                                    }
-                                }
+                                let _ = trigger_full_scan_internal(&app_handle, None, None).await;
                             });
                         }
                         _ => {}
@@ -293,7 +371,9 @@ pub fn run() {
             get_auto_analysis_prompt,
             ensure_workspace_dirs,
             list_reports,
-            read_report
+            read_report,
+            trigger_full_scan,
+            update_ai_config
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

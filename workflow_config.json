@@ -7,6 +7,6 @@
   "ai": {
     "api_base": "http://127.0.0.1:8317/v1",
     "api_key": "sk-iy1GqgoDMTw04qChC",
-    "model": "gemini-2.5-flash-lite"
+    "model": "gemini-3-flash-preview"
   }
 }

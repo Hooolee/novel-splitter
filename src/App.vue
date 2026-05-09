@@ -43,7 +43,7 @@ const reportToc = computed(() => {
     const lines = reportContent.value.split('\n');
     const toc: { level: number; text: string; id: string }[] = [];
     for (const line of lines) {
-        const match = line.match(/^(#{1,3})\s+(.+)/);
+        const match = line.match(/^(#{1,4})\s+(.+)/);
         if (match) {
             const text = match[2].replace(/\*\*/g, '').trim();
             const id = 'heading-' + text.replace(/[^\w\u4e00-\u9fff]+/g, '-').replace(/^-|-$/g, '');
@@ -117,7 +117,7 @@ const aiConfig = ref({
 const availableModels = ref<string[]>([]);
 const isFetchingModels = ref(false);
 
-function saveSettings() {
+async function saveSettings() {
     localStorage.setItem('ai_api_base', aiConfig.value.apiBase);
     localStorage.setItem('ai_api_key', aiConfig.value.apiKey);
     localStorage.setItem('ai_model', aiConfig.value.model);
@@ -125,6 +125,19 @@ function saveSettings() {
     localStorage.setItem('ai_prompt_summary', aiConfig.value.promptSummary);
     localStorage.setItem('ai_analysis_chapters', String(aiConfig.value.analysisChapters));
     localStorage.setItem('spider_visible', String(aiConfig.value.spiderVisible));
+    
+    // 同步到后端的 workflow_config.json 供全量扫榜和定时任务使用
+    try {
+        await invoke('update_ai_config', {
+            apiBase: aiConfig.value.apiBase,
+            apiKey: aiConfig.value.apiKey,
+            model: aiConfig.value.model
+        });
+        console.log("Synced AI config to backend workflow_config.json");
+    } catch (e) {
+        console.error("Failed to sync AI config to backend:", e);
+    }
+    
     showSettings.value = false;
 }
 
@@ -243,11 +256,17 @@ onMounted(() => {
         if (payload.status === 'completed') {
              isDownloading.value = false;
              // 移除自动分析，改为手动触发
-        } else if (payload.status === 'error') {
+         } else if (payload.status === 'error') {
             // Error handling
             // We might want to stop on critical error?
             // isDownloading.value = false;
         }
+    });
+
+    listen("report-generated", () => {
+        isDownloading.value = false;
+        logContent.value += `[${new Date().toLocaleTimeString()}] 扫榜完成，报告已生成。\n`;
+        loadReportFiles();
     });
 
     // Strategy 2: Periodic refresh while downloading (every 2s) to catch new folders
@@ -707,6 +726,28 @@ async function loadReportFiles() {
         reportFiles.value = [];
     }
 }
+const selectedRank = ref('');
+
+async function triggerFullScan() {
+    isDownloading.value = true;
+    logContent.value += `[${new Date().toLocaleTimeString()}] 已触发后台全量扫榜任务...\n`;
+    activeTab.value = 'reports'; // 切换到报告页
+    
+    let targetUrl = null;
+    let platform = null;
+    if (selectedRank.value) {
+        const parts = selectedRank.value.split(":");
+        platform = parts[0];
+        targetUrl = parts.slice(1).join(":");
+    }
+
+    try {
+        await invoke('trigger_full_scan', { targetUrl, platform });
+    } catch (e) {
+        logContent.value += `[${new Date().toLocaleTimeString()}] 触发失败: ${e}\n`;
+        isDownloading.value = false;
+    }
+}
 
 async function selectReport(filename: string) {
     selectedReport.value = filename;
@@ -934,6 +975,40 @@ function formatReportName(filename: string): string {
             <span class="text-[11px] font-bold text-txt-dim uppercase tracking-wider">扫榜报告</span>
             <button @click="loadReportFiles" class="text-txt-dim hover:text-txt transition-colors p-1 rounded hover:bg-subtle" title="刷新">
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" /></svg>
+            </button>
+        </div>
+        <div class="flex flex-col gap-2 mb-3">
+            <!-- 美化后的下拉框 -->
+            <div class="relative w-full">
+                <select v-model="selectedRank" class="w-full appearance-none bg-subtle border border-border-dim text-txt text-[12px] rounded-lg pl-4 pr-10 py-2.5 outline-none focus:border-accent focus:ring-1 focus:ring-accent/30 transition-all cursor-pointer shadow-sm">
+                    <option value="">(按配置 workflow_config.json 批量扫榜)</option>
+                    <optgroup label="起点榜单" class="bg-subtle text-txt">
+                        <option value="qidian:https://www.qidian.com/rank/hotsales/">起点畅销榜</option>
+                        <option value="qidian:https://www.qidian.com/rank/yuepiao/">起点月票榜</option>
+                        <option value="qidian:https://www.qidian.com/rank/newbook/">起点新书榜</option>
+                        <option value="qidian:https://www.qidian.com/rank/newsign/">起点签约榜</option>
+                        <option value="qidian:https://www.qidian.com/rank/recom/">起点推荐榜</option>
+                        <option value="qidian:https://www.qidian.com/rank/sanjiang/">起点三江榜</option>
+                    </optgroup>
+                    <optgroup label="番茄榜单 (开发中)" class="bg-subtle text-txt">
+                        <option value="fanqie:https://fanqienovel.com/rank/1_2_1141">番茄男频阅读榜</option>
+                        <option value="fanqie:https://fanqienovel.com/rank/0_2_1139">番茄女频阅读榜</option>
+                    </optgroup>
+                </select>
+                <!-- 自定义右侧箭头 -->
+                <div class="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none text-txt-dim">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4 opacity-70">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+                    </svg>
+                </div>
+            </div>
+            <button 
+                @click="triggerFullScan"
+                :disabled="isDownloading"
+                class="w-full bg-gradient-to-r from-accent to-orange-500 text-[var(--accent-text)] font-bold py-2.5 px-4 rounded-lg hover:opacity-90 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 text-xs shadow-sm"
+            >
+                <span v-if="isDownloading" class="animate-spin text-lg">⏳</span>
+                <span>{{ isDownloading ? '后台扫榜中...' : '🚀 立即扫榜此榜单' }}</span>
             </button>
         </div>
         <div class="flex-1 bg-subtle rounded-xl border border-border-dim overflow-y-auto mb-4 select-none p-2 space-y-1 custom-scrollbar">
@@ -1258,6 +1333,7 @@ function formatReportName(filename: string): string {
 :deep(.prose) h1 { font-size: 1.5em; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 0.3em; }
 :deep(.prose) h2 { font-size: 1.25em; }
 :deep(.prose) h3 { font-size: 1.1em; }
+:deep(.prose) h4 { font-size: 1em; opacity: 0.9; }
 :deep(.prose) p { margin: 0.6em 0; line-height: 1.7; color: var(--txt-color, #e5e5e5); font-size: 0.875rem; }
 :deep(.prose) ul, :deep(.prose) ol { padding-left: 1.5em; margin: 0.5em 0; }
 :deep(.prose) li { margin: 0.3em 0; font-size: 0.875rem; line-height: 1.6; color: var(--txt-color, #d4d4d4); }

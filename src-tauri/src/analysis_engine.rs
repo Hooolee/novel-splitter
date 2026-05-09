@@ -113,6 +113,16 @@ pub async fn run_full_analysis_pipeline(
         });
     }
 
+    // [DB] 尝试连接数据库并创建本次扫描报告的记录
+    let db_conn_opt = crate::db::get_conn().ok();
+    let mut report_id_opt = None;
+    if let Some(ref conn) = db_conn_opt {
+        match crate::db::create_scan_report(conn, rank_url) {
+            Ok(rid) => report_id_opt = Some(rid),
+            Err(e) => eprintln!("Pipeline DB Error: Failed to create scan report: {}", e),
+        }
+    }
+
     calculate_velocity(&mut current_novels, last_list.clone());
     println!("Pipeline: Scanned {} novels. Start analyzing top 30...", current_novels.len());
 
@@ -142,6 +152,29 @@ pub async fn run_full_analysis_pipeline(
             Ok(meta) => {
                 novel.title = meta.title.clone();
                 novel.metadata = Some(serde_json::to_value(&meta).unwrap());
+                
+                // [DB] 记录书籍静态信息和本次的快照
+                let mut novel_id_opt = None;
+                if let Some(ref conn) = db_conn_opt {
+                    let author = "未知".to_string(); // 暂时使用未知，后续在蜘蛛层补充
+                    let tags = meta.tags.join(",");
+                    // 尝试从字符串（例如 "32.4万字"）提取数字，这里暂时简化，如果解析失败默认给 0
+                    let word_count = 0; 
+                    match crate::db::upsert_novel(conn, &novel.book_id, platform, &novel.title, &author, &tags, word_count) {
+                        Ok(nid) => {
+                            novel_id_opt = Some(nid);
+                            if let Some(rid) = report_id_opt {
+                                let rank_change_str = if novel.is_new {
+                                    "+NEW".to_string()
+                                } else {
+                                    novel.rank_change.to_string()
+                                };
+                                let _ = crate::db::insert_rank_history(conn, rid, nid, novel.rank as i64, &rank_change_str);
+                            }
+                        },
+                        Err(e) => eprintln!("Pipeline DB Error: {}", e),
+                    }
+                }
                 
                 // 检查缓存
                 if let Some(cached_analysis) = last_analysis_map.get(&novel.book_id) {
@@ -180,10 +213,28 @@ pub async fn run_full_analysis_pipeline(
                         combined_content.clear();
                         println!("Pipeline: Cache miss for {}. Fetching chapters from network...", novel.title);
                         if let Ok(chapters) = crate::spiders::qidian::fetch_chapter_list(app, &novel.url, false).await {
+                            // 创建本地书库目录
+                            let _ = std::fs::create_dir_all(&novel_dir);
+                            // 写入 metadata.json 供前端书库识别
+                            if let Ok(meta_json) = serde_json::to_string_pretty(&meta) {
+                                let _ = std::fs::write(novel_dir.join("metadata.json"), meta_json);
+                            }
+                            
+                            let mut idx = 1;
                             for (title, ch_url) in chapters.into_iter().take(3) {
                                 println!("  -> Downloading chapter: {}", title);
                                 if let Ok((_, content)) = crate::spiders::qidian::download_chapter(app, &ch_url, false).await {
-                                    combined_content.push_str(&format!("## {}\n{}\n\n", title, content));
+                                    let chapter_content = format!("{}\n\n{}", title, content);
+                                    combined_content.push_str(&format!("## {}\n\n", chapter_content));
+                                    // 写入单章文本
+                                    let _ = std::fs::write(novel_dir.join(format!("{:02}.txt", idx)), &chapter_content);
+                                    
+                                    // [DB] 存入数据库章节表
+                                    if let (Some(ref conn), Some(nid)) = (&db_conn_opt, novel_id_opt) {
+                                        let _ = crate::db::upsert_chapter(conn, nid, idx as i64, &title, &content, None);
+                                    }
+                                    
+                                    idx += 1;
                                 }
                             }
                         }
@@ -199,6 +250,13 @@ pub async fn run_full_analysis_pipeline(
                                     if novel.is_new { "新上榜" } else { "稳坐" },
                                     novel.title, novel.rank, novel.rank_change));
                                 report_segment.push_str(&format!("> **微观拆解**: {}\n\n", ai_report));
+                                
+                                // [DB] 更新 AI 评价（后续将升级为多智能体评价写入）
+                                if let (Some(ref conn), Some(nid)) = (&db_conn_opt, novel_id_opt) {
+                                    // 为了复用，可以在这里直接用 SQLite UPDATE 补全 ai_reviews_json
+                                    let _ = conn.execute("UPDATE novels SET ai_reviews_json = ?1 WHERE id = ?2", 
+                                        rusqlite::params![serde_json::to_string(&ai_report).unwrap_or_default(), nid]);
+                                }
                             },
                             Err(e) => eprintln!("  -> AI failed: {}", e),
                         }
@@ -217,6 +275,46 @@ pub async fn run_full_analysis_pipeline(
 
     // 保存今日快照
     let _ = history.save_snapshot(&current_novels);
-    
+
+    // ===== 宏观趋势总结 =====
+    if !report_segment.is_empty() {
+        println!("Pipeline: Generating macro trend summary...");
+        let trend_prompt = r#"你是一个顶级网文市场分析师。以下是当前排行榜前30本小说的逐本深度拆解报告。
+
+请基于以上所有分析，输出一份【榜单宏观趋势洞察】，必须包含以下板块：
+
+## 📈 题材热度排行
+按出现频次和排名权重，列出当前最热门的3-5个题材方向，并简要说明每个题材的核心卖点。
+
+## 🔧 金手指流行趋势
+总结当前榜单上最常见的3-5种金手指类型（如系统流、重生流、穿越流、签到流等），分析它们为什么能吸引读者。
+
+## 🎭 开篇套路分析
+总结排行榜头部作品最常用的开篇手法（如何在前三章抓住读者），提炼出可复用的模式。
+
+## 💡 开书方向建议
+基于以上分析，为准备开新书的作者提供3个具体的、可执行的开书方向建议，每个方向需包含：
+- 推荐题材+金手指组合
+- 差异化切入点（如何避免与现有爆款撞车）
+- 预期目标读者群
+
+## ⚠️ 避坑提醒
+列出当前市场中应该避免的3个常见错误或已经饱和的方向。
+
+请用 Markdown 格式输出，语言精炼、观点鲜明。"#.to_string();
+
+        match crate::ai::call_ai(ai_config.clone(), trend_prompt, report_segment.clone(), false).await {
+            Ok(trend_report) => {
+                report_segment.push_str("\n\n---\n\n# 🔮 榜单宏观趋势洞察\n\n");
+                report_segment.push_str(&trend_report);
+                println!("Pipeline: Macro trend summary generated successfully.");
+            },
+            Err(e) => {
+                eprintln!("Pipeline: Failed to generate trend summary: {}", e);
+                report_segment.push_str("\n\n---\n\n> ⚠️ 宏观趋势分析生成失败，请检查 AI 配置。\n");
+            }
+        }
+    }
+
     Ok(report_segment)
 }
