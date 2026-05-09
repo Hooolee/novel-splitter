@@ -58,3 +58,24 @@ debug
 
 app.log
 workflow_config.json
+
+# 敏感配置（含 API key）
+test.env
+.env
+
+# 数据库（运行时产物）
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Claude Code 本地配置
+.claude/settings.local.json
+.claude/host-*.local.json
+
+# 工具本地缓存
+.playwright-mcp/
+
+# 运行时输出
+analysis_data/
+reports/
