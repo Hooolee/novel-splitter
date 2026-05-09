@@ -38,6 +38,7 @@ fn test_pipeline_e2e() {
     let result = rt.block_on(async {
         crate::analysis_engine::run_full_analysis_pipeline(
             &handle, rank_url, platform, &project_root,
+            crate::analysis_engine::PipelineMode::Rank,
         ).await
     });
 

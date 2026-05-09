@@ -211,9 +211,15 @@ async fn trigger_full_scan_internal(app_handle: &tauri::AppHandle, target_url: O
         let platform = platform_opt.unwrap_or_else(|| {
             if target.contains("fanqie") { "fanqie".to_string() } else { "qidian".to_string() }
         });
-        println!("Manual: Triggering analysis for specific target {} on platform {}", target, platform);
+        // URL 含 /book/ 或 /info/ 视为单本，否则按榜单处理
+        let mode = if target.contains("/book/") || target.contains("/info/") {
+            crate::analysis_engine::PipelineMode::Single
+        } else {
+            crate::analysis_engine::PipelineMode::Rank
+        };
+        println!("Manual: Triggering analysis ({:?}) for target {} on platform {}", mode, target, platform);
         match crate::analysis_engine::run_full_analysis_pipeline(
-            app_handle, &target, &platform, &workspace_root
+            app_handle, &target, &platform, &workspace_root, mode
         ).await {
             Ok(partial) => {
                 any_success = true;
@@ -230,7 +236,8 @@ async fn trigger_full_scan_internal(app_handle: &tauri::AppHandle, target_url: O
                     let platform = if rank_url.contains("fanqie") { "fanqie" } else { "qidian" };
                     println!("Manual: Triggering analysis for {}", rank_url);
                     match crate::analysis_engine::run_full_analysis_pipeline(
-                        app_handle, rank_url, platform, &workspace_root
+                        app_handle, rank_url, platform, &workspace_root,
+                        crate::analysis_engine::PipelineMode::Rank,
                     ).await {
                         Ok(partial) => {
                             any_success = true;

@@ -26,11 +26,11 @@ const downloadsDir = computed(() => {
 });
 
 // --- State ---
-const mode = ref<'single' | 'rank'>('single');
-const platform = ref('fanqie');
+// V2.0 流水线由 trigger_full_scan 驱动；前端只保留「+ 添加书籍」入口的轻量配置。
+const newBookPlatform = ref<'qidian' | 'fanqie'>('qidian');
 
 // --- Tab Navigation ---
-const activeTab = ref<'library' | 'reports' | 'download'>('library');
+const activeTab = ref<'library' | 'reports'>('library');
 
 // --- Reports State ---
 const reportFiles = ref<string[]>([]);
@@ -58,14 +58,18 @@ function scrollToHeading(id: string) {
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-// Single Mode Config
-const url = ref("");
-const count = ref(10);
+// 「+ 添加书籍」模态框
+const showAddBookModal = ref(false);
+const newBookUrl = ref("");
 
-// Rank Mode Config
-const rankUrl = ref("");
-const rankCount = ref(5);
-const rankChapterCount = ref(5);
+// 流水线阶段事件（pipeline-progress payload）
+interface PipelineProgress {
+    phase: number;                          // 1=Producer 2=Fetch 3=AI Outline 4=Multi-Agent
+    status: 'started' | 'completed' | 'failed';
+    message: string;
+    progress: [number, number] | null;      // (done, total)
+}
+const currentPhase = ref<PipelineProgress | null>(null);
 
 const isDownloading = ref(false);
 
@@ -274,8 +278,24 @@ onMounted(async () => {
 
     listen("report-generated", () => {
         isDownloading.value = false;
+        currentPhase.value = null;
         logContent.value += `[${new Date().toLocaleTimeString()}] 扫榜完成，报告已生成。\n`;
         loadReportFiles();
+        refreshTreeFiles();
+    });
+
+    listen<PipelineProgress>("pipeline-progress", (event) => {
+        const payload = event.payload;
+        currentPhase.value = payload;
+        const progressTag = payload.progress
+            ? ` (${payload.progress[0]}/${payload.progress[1]})`
+            : '';
+        downloadLog.value.push(
+            `[${new Date().toLocaleTimeString()}] [Phase ${payload.phase}/${4} · ${payload.status}]${progressTag} ${payload.message}`
+        );
+        if (payload.phase === 2 && payload.status === 'completed') {
+            refreshTreeFiles();
+        }
     });
 
     // Strategy 2: Periodic refresh while downloading (every 2s) to catch new folders
@@ -289,10 +309,12 @@ onMounted(async () => {
     loadReportFiles();
 });
 
-async function startTask() {
+async function submitAddBook() {
     if (isDownloading.value) return;
-
-    // Check if workspace is configured
+    if (!newBookUrl.value.trim()) {
+        alert("请输入小说主页 URL");
+        return;
+    }
     if (!workspaceRoot.value) {
         alert("请先选择工作目录");
         return;
@@ -300,29 +322,14 @@ async function startTask() {
 
     isDownloading.value = true;
     downloadLog.value = [];
-    currentMetadata.value = null; // Clear old metadata
+    currentMetadata.value = null;
+    showAddBookModal.value = false;
 
     try {
-        if (mode.value === 'single') {
-            await invoke("start_download", {
-                url: url.value,
-                count: Number(count.value),
-                dirName: downloadsDir.value,
-                platform: platform.value,
-                debugSpiderVisible: aiConfig.value.spiderVisible,
-                workspaceRoot: workspaceRoot.value || null
-            });
-        } else {
-             await invoke("scan_and_download_rank", {
-                rankUrl: rankUrl.value,
-                maxNovels: Number(rankCount.value),
-                countPerNovel: Number(rankChapterCount.value),
-                dirName: downloadsDir.value,
-                platform: platform.value,
-                debugSpiderVisible: aiConfig.value.spiderVisible,
-                workspaceRoot: workspaceRoot.value || null
-            });
-        }
+        await invoke("trigger_full_scan", {
+            targetUrl: newBookUrl.value.trim(),
+            platform: newBookPlatform.value,
+        });
     } catch (e) {
         alert("Error: " + e);
         isDownloading.value = false;
@@ -814,10 +821,9 @@ function formatReportName(filename: string): string {
         
         <!-- Tab Switcher -->
         <div class="bg-subtle p-1 rounded-lg flex mb-6 relative border border-border-dim">
-            <div class="absolute top-1 bottom-1 rounded-md bg-active border border-border-dim shadow-sm transition-all duration-300 ease-out" :style="{ left: activeTab === 'library' ? '4px' : activeTab === 'reports' ? 'calc(33.33% + 1px)' : 'calc(66.66% + 2px)', width: 'calc(33.33% - 5px)' }"></div>
+            <div class="absolute top-1 bottom-1 rounded-md bg-active border border-border-dim shadow-sm transition-all duration-300 ease-out" :style="{ left: activeTab === 'library' ? '4px' : 'calc(50% + 1px)', width: 'calc(50% - 5px)' }"></div>
             <button @click="activeTab = 'library'" class="flex-1 relative z-10 text-xs font-medium py-1.5 text-center transition-colors duration-200" :class="activeTab === 'library' ? 'text-txt' : 'text-txt-dim hover:text-txt'">📚 书库</button>
             <button @click="activeTab = 'reports'; loadReportFiles()" class="flex-1 relative z-10 text-xs font-medium py-1.5 text-center transition-colors duration-200" :class="activeTab === 'reports' ? 'text-txt' : 'text-txt-dim hover:text-txt'">📊 报告</button>
-            <button @click="activeTab = 'download'" class="flex-1 relative z-10 text-xs font-medium py-1.5 text-center transition-colors duration-200" :class="activeTab === 'download' ? 'text-txt' : 'text-txt-dim hover:text-txt'">⬇ 下载</button>
         </div>
 
         <!-- ==================== 书库 Tab ==================== -->
@@ -852,11 +858,18 @@ function formatReportName(filename: string): string {
         <!-- Resources Title -->
         <div class="flex items-center justify-between mb-3 px-1">
             <span class="text-[11px] font-bold text-txt-dim uppercase tracking-wider">Resources</span>
-            <button @click="refreshTreeFiles" class="text-txt-dim hover:text-txt transition-colors p-1 rounded hover:bg-subtle" title="刷新列表">
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
-                </svg>
-            </button>
+            <div class="flex items-center gap-1">
+                <button @click="showAddBookModal = true" :disabled="!workspaceRoot || isDownloading" class="text-accent hover:text-orange-300 transition-colors p-1 rounded hover:bg-subtle disabled:opacity-30 disabled:cursor-not-allowed" title="添加单本书籍（走 V2.0 完整管线）">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                    </svg>
+                </button>
+                <button @click="refreshTreeFiles" class="text-txt-dim hover:text-txt transition-colors p-1 rounded hover:bg-subtle" title="刷新列表">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                    </svg>
+                </button>
+            </div>
         </div>
         
         <!-- Tree View -->
@@ -877,7 +890,7 @@ function formatReportName(filename: string): string {
                          <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 9.776c.112-.017.227-.026.344-.026h15.812c.117 0 .232.009.344.026m-16.5 0a2.25 2.25 0 00-1.883 2.542l.857 6a2.25 2.25 0 002.227 1.932H19.05a2.25 2.25 0 002.227-1.932l.857-6a2.25 2.25 0 00-1.883-2.542m-16.5 0V6A2.25 2.25 0 016 3.75h3.879a1.5 1.5 0 011.06.44l2.122 2.12a1.5 1.5 0 001.06.44H18A2.25 2.25 0 0120.25 9v.776" />
                     </svg>
                 </div>
-                <div class="text-center opacity-50">暂无书籍<br>请在上方下载</div>
+                <div class="text-center opacity-50">暂无书籍<br>点击右上角 + 添加，或等待后台扫榜</div>
             </div>
             
             <template v-for="node in treeFiles" :key="node.path">
@@ -1050,38 +1063,6 @@ function formatReportName(filename: string): string {
         </div>
         </template>
 
-        <!-- ==================== 下载 Tab ==================== -->
-        <template v-if="activeTab === 'download'">
-        <div class="space-y-4 px-1 flex-1 overflow-y-auto">
-            <div class="flex flex-col gap-1">
-                <label class="text-xs text-gray-400">平台</label>
-                <select v-model="platform" class="bg-input border border-border rounded px-2 py-2 text-sm focus:border-accent outline-none appearance-none">
-                    <option value="fanqie">🍅 番茄小说</option>
-                    <option value="qidian">📖 起点中文网</option>
-                </select>
-            </div>
-            <div class="flex flex-col gap-1">
-                <label class="text-xs text-gray-400">下载模式</label>
-                <div class="flex gap-2">
-                    <button @click="mode = 'single'" class="flex-1 py-1.5 text-xs rounded-md border transition-all" :class="mode === 'single' ? 'bg-accent/20 border-accent text-accent' : 'border-border-dim text-txt-dim hover:text-txt'">单本</button>
-                    <button @click="mode = 'rank'" class="flex-1 py-1.5 text-xs rounded-md border transition-all" :class="mode === 'rank' ? 'bg-accent/20 border-accent text-accent' : 'border-border-dim text-txt-dim hover:text-txt'">榜单</button>
-                </div>
-            </div>
-            <template v-if="mode === 'single'">
-                <div class="flex flex-col gap-1"><label class="text-xs text-gray-400">小说主页链接</label><input v-model="url" type="text" class="bg-input border border-border rounded px-3 py-2 text-sm focus:border-accent outline-none"></div>
-                <div class="flex flex-col gap-1"><label class="text-xs text-gray-400">抓取章数</label><input v-model="count" type="number" class="bg-input border border-border rounded px-3 py-2 text-sm focus:border-accent outline-none"></div>
-            </template>
-            <template v-else>
-                <div class="flex flex-col gap-1"><label class="text-xs text-gray-400">榜单链接</label><input v-model="rankUrl" type="text" class="bg-input border border-border rounded px-3 py-2 text-sm focus:border-accent outline-none"></div>
-                <div class="flex flex-col gap-1"><label class="text-xs text-gray-400">抓取本数</label><input v-model="rankCount" type="number" min="1" class="bg-input border border-border rounded px-3 py-2 text-sm focus:border-accent outline-none"></div>
-                <div class="flex flex-col gap-1"><label class="text-xs text-gray-400">每本章数</label><input v-model="rankChapterCount" type="number" class="bg-input border border-border rounded px-3 py-2 text-sm focus:border-accent outline-none"></div>
-            </template>
-            <button @click="startTask" :disabled="isDownloading || !workspaceRoot" class="w-full bg-accent text-[var(--accent-text)] font-bold px-4 py-2.5 rounded-lg hover:opacity-90 text-xs disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
-                {{ isDownloading ? '⬇ 运行中...' : (mode === 'single' ? '⬇ 开始下载' : '🚀 扫榜下载') }}
-            </button>
-        </div>
-        </template>
-
         <div class="mt-auto pt-4 border-t border-border-dim flex justify-between items-center group/settings">
             <span class="text-[10px] text-txt-dim group-hover/settings:text-txt transition-colors">SETTINGS</span>
             <div class="flex gap-1">
@@ -1203,7 +1184,15 @@ function formatReportName(filename: string): string {
                 <span>📜</span> 查看日志
             </button>
             <span class="font-bold whitespace-nowrap" :class="isDownloading ? 'text-success' : ''">
-                {{ isDownloading ? (mode === 'single' ? '正在下载...' : '正在扫榜...') : '就绪' }}
+                <template v-if="currentPhase">
+                    Phase {{ currentPhase.phase }}/4 · {{ currentPhase.message }}
+                </template>
+                <template v-else-if="isDownloading">
+                    正在扫榜...
+                </template>
+                <template v-else>
+                    就绪
+                </template>
             </span>
             <span v-if="downloadLog.length > 0" class="text-accent truncate flex-1">
                 {{ downloadLog[downloadLog.length - 1] }}
@@ -1212,6 +1201,56 @@ function formatReportName(filename: string): string {
 
     </div>
 
+  </div>
+
+  <!-- Add Book Modal -->
+  <div v-if="showAddBookModal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 backdrop-blur-sm" @click.self="showAddBookModal = false">
+      <div class="bg-card border border-border p-6 rounded-xl w-96 shadow-2xl">
+          <h3 class="text-lg font-bold mb-4 flex items-center gap-2">
+              📥 添加书籍
+          </h3>
+          <p class="text-[11px] text-txt-dim mb-4 leading-relaxed">
+              输入小说主页 URL，系统会走完整 V2.0 流水线（抓取 → AI 提纯细纲 → 多 Agent 评估）。
+          </p>
+
+          <div class="space-y-4">
+              <div class="flex flex-col gap-1">
+                  <label class="text-xs text-gray-500">平台</label>
+                  <select v-model="newBookPlatform" class="bg-input border border-border rounded px-3 py-2 text-sm outline-none focus:border-accent">
+                      <option value="qidian">📖 起点中文网</option>
+                      <option value="fanqie">🍅 番茄小说（开发中）</option>
+                  </select>
+              </div>
+
+              <div class="flex flex-col gap-1">
+                  <label class="text-xs text-gray-500">小说主页 URL</label>
+                  <input
+                      v-model="newBookUrl"
+                      type="text"
+                      placeholder="https://www.qidian.com/book/..."
+                      class="bg-input border border-border rounded px-3 py-2 text-sm outline-none focus:border-accent"
+                      @keyup.enter="submitAddBook"
+                  >
+                  <p class="text-[10px] text-gray-500">需为单本小说主页（含 /book/ 或 /info/ 路径）</p>
+              </div>
+          </div>
+
+          <div class="flex gap-2 mt-6">
+              <button
+                  @click="showAddBookModal = false"
+                  class="flex-1 py-2 text-xs rounded-lg border border-border-dim text-txt-dim hover:text-txt hover:border-border transition-all"
+              >
+                  取消
+              </button>
+              <button
+                  @click="submitAddBook"
+                  :disabled="isDownloading || !newBookUrl.trim()"
+                  class="flex-1 py-2 text-xs rounded-lg bg-accent text-[var(--accent-text)] font-bold hover:opacity-90 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                  {{ isDownloading ? '运行中…' : '🚀 开始拆解' }}
+              </button>
+          </div>
+      </div>
   </div>
 
   <!-- Settings Modal -->

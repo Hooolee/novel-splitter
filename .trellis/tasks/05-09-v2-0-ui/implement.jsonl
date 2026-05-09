@@ -1,0 +1,14 @@
+{"file": ".trellis/spec/frontend/index.md", "reason": "前端 spec 入口与导航，本任务主战场"}
+{"file": ".trellis/spec/frontend/components.md", "reason": "新增「+ 添加书籍」模态框组件、「立即扫榜」按钮组件需遵循 SFC + script setup 规范"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "删除 download Tab 相关 ref（platform/mode/url/count/rankUrl/rankCount/rankChapterCount）+ 新增 addBookModalOpen / pipelinePhase 等 ref；listen() 顶层管理 download-progress→pipeline-progress 迁移"}
+{"file": ".trellis/spec/frontend/tauri-integration.md", "reason": "本任务关键：invoke trigger_full_scan(target_url, platform) + 新增 listen('pipeline-progress') 事件协议；onMounted/onUnmounted 监听管理"}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "PipelineProgress 接口定义（phase/status/message/progress 元组），不允许 any"}
+{"file": ".trellis/spec/frontend/css-layout.md", "reason": "Tab 切换器从 3-Tab（calc(33.33%)）收为 2-Tab（calc(50%)）的间距重排；模态框 fixed inset-0 + backdrop-blur 模式"}
+{"file": ".trellis/spec/frontend/composables.md", "reason": "如逻辑复用（如 usePipelineProgress）应抽 composable"}
+{"file": ".trellis/spec/backend/tauri-commands.md", "reason": "PR1 后端 run_full_analysis_pipeline 适配单本 URL 路径 + emit pipeline-progress 需遵循命令定义规范"}
+{"file": ".trellis/spec/backend/logging.md", "reason": "Phase 1-4 边界 emit + eprintln 阶段日志风格与现有任务一/二一致"}
+{"file": ".trellis/spec/backend/type-safety.md", "reason": "PipelineProgress 结构体序列化、Option<(usize,usize)> 类型安全"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "本任务跨 Vue→Tauri invoke→Rust pipeline→事件回 Vue 全链路，必读跨层思维"}
+{"file": ".trellis/spec/guides/pre-implementation-checklist.md", "reason": "实现前必走 checklist"}
+{"file": ".trellis/spec/guides/testing-responsibility.md", "reason": "测试是 implementer 责任：删 Tab 改动属可视化变更须自测；单本走新管线后 pipeline_e2e 须加单本路径断言"}
+{"file": ".trellis/tasks/archive/2026-05/05-09-v2-0-ai-agent/prd.md", "reason": "父 PRD，提供 V2.0 任务一三段管线 + 任务二多 Agent 评估的完整上下文，本任务是其延续"}

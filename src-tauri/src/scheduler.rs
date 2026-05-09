@@ -39,6 +39,7 @@ pub fn init(app_handle: AppHandle) {
                                         rank_url,
                                         "qidian",
                                         workspace_root,
+                                        crate::analysis_engine::PipelineMode::Rank,
                                     ).await;
 
                                     match res {

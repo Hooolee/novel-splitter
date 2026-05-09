@@ -4,9 +4,43 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use chrono::Local;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tokio::sync::Semaphore;
 use tokio::time::{sleep, Duration};
+
+/// 流水线模式：榜单批量 vs 单本拆解。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PipelineMode {
+    Rank,
+    Single,
+}
+
+/// 流水线阶段事件 payload，emit 到前端 `pipeline-progress`。
+#[derive(Serialize, Clone)]
+pub struct PipelineProgress {
+    pub phase: u8,                          // 1=Producer, 2=Fetch, 3=AI Outline, 4=Multi-Agent
+    pub status: String,                     // "started" | "completed" | "failed"
+    pub message: String,
+    pub progress: Option<(usize, usize)>,   // (done, total)
+}
+
+fn emit_pipeline_progress(
+    app: &tauri::AppHandle,
+    phase: u8,
+    status: &str,
+    message: impl Into<String>,
+    progress: Option<(usize, usize)>,
+) {
+    let _ = app.emit(
+        "pipeline-progress",
+        PipelineProgress {
+            phase,
+            status: status.to_string(),
+            message: message.into(),
+            progress,
+        },
+    );
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct NovelRankInfo {
@@ -173,6 +207,43 @@ async fn producer_scan_rank(
 
     eprintln!("[Producer] 完成: 扫到 {} 本书", results.len());
     Ok(results)
+}
+
+// ========================================================================
+//  Phase 1 (Single): 单本下载，跳过榜单分发，直接构造一本书
+// ========================================================================
+async fn producer_single_book(
+    app: &tauri::AppHandle,
+    novel_url: &str,
+    platform: &str,
+) -> Result<Vec<(i64, String, String, String)>, String> {
+    eprintln!("[Producer:Single] 单本: {}", novel_url);
+
+    let book_id = novel_url
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .last()
+        .unwrap_or(novel_url)
+        .to_string();
+
+    let client = reqwest::Client::new();
+    let (title, author, tags) = match platform {
+        "qidian" => {
+            match crate::spiders::qidian::fetch_novel_metadata(&client, novel_url, app, false).await {
+                Ok(meta) => (meta.title.clone(), "未知".to_string(), meta.tags.join(",")),
+                Err(e) => return Err(format!("获取单本元数据失败: {}", e)),
+            }
+        }
+        "fanqie" => return Err("番茄单本暂未实现".to_string()),
+        _ => return Err("不支持的平台".to_string()),
+    };
+
+    let conn = crate::db::get_conn().map_err(|e| format!("DB 连接失败: {}", e))?;
+    let nid = crate::db::upsert_novel(&conn, &book_id, platform, &title, &author, &tags, 0)
+        .map_err(|e| format!("DB upsert 失败: {}", e))?;
+
+    eprintln!("[Producer:Single] id={} title={}", book_id, title);
+    Ok(vec![(nid, book_id, title, novel_url.to_string())])
 }
 
 // ========================================================================
@@ -547,11 +618,12 @@ async fn generate_report(rank_url: &str) -> Result<String, String> {
 // ========================================================================
 pub async fn run_full_analysis_pipeline(
     app: &tauri::AppHandle,
-    rank_url: &str,
+    target_url: &str,
     platform: &str,
     workspace_root: &Path,
+    mode: PipelineMode,
 ) -> Result<String, String> {
-    eprintln!("\n========== Pipeline: {} ==========", rank_url);
+    eprintln!("\n========== Pipeline ({:?}): {} ==========", mode, target_url);
     let started = Local::now();
 
     // 从 Tauri 全局状态读取 AI 配置（由前端 UI 设置）
@@ -565,28 +637,80 @@ pub async fn run_full_analysis_pipeline(
 
     // ------ Phase 1: Producer ------
     eprintln!("[Pipeline 1/4] Producer...");
-    let books = producer_scan_rank(app, rank_url, platform).await?;
-    if books.is_empty() {
-        return Err("Producer 未扫到有效书籍".to_string());
-    }
+    emit_pipeline_progress(app, 1, "started", match mode {
+        PipelineMode::Rank => "扫榜分发中…",
+        PipelineMode::Single => "解析单本元数据…",
+    }, None);
+
+    let books = match mode {
+        PipelineMode::Rank => producer_scan_rank(app, target_url, platform).await,
+        PipelineMode::Single => producer_single_book(app, target_url, platform).await,
+    };
+    let books = match books {
+        Ok(b) if !b.is_empty() => {
+            emit_pipeline_progress(app, 1, "completed",
+                format!("Phase 1 完成：{} 本", b.len()),
+                Some((b.len(), b.len())));
+            b
+        }
+        Ok(_) => {
+            emit_pipeline_progress(app, 1, "failed", "Producer 未扫到有效书籍".to_string(), None);
+            return Err("Producer 未扫到有效书籍".to_string());
+        }
+        Err(e) => {
+            emit_pipeline_progress(app, 1, "failed", format!("Phase 1 失败: {}", e), None);
+            return Err(e);
+        }
+    };
 
     // ------ Phase 2: Fetch Workers (Semaphore=3) ------
     eprintln!("[Pipeline 2/4] Fetch Workers...");
+    emit_pipeline_progress(app, 2, "started",
+        format!("抓取章节 ({} 本)", books.len()),
+        Some((0, books.len())));
     let fetch_list: Vec<(i64, String, String)> = books.iter()
         .map(|(id, _, title, url)| (*id, title.clone(), url.clone()))
         .collect();
-    let (_ch_ok, _ch_fail) = run_fetch_workers(
+    match run_fetch_workers(
         app, fetch_list, platform, workspace_root, semaphore.clone()
-    ).await?;
+    ).await {
+        Ok((ok, fail)) => {
+            emit_pipeline_progress(app, 2, "completed",
+                format!("Phase 2 完成：成功 {} 章 / 失败 {} 章", ok, fail),
+                Some((ok, ok + fail)));
+        }
+        Err(e) => {
+            emit_pipeline_progress(app, 2, "failed", format!("Phase 2 失败: {}", e), None);
+            return Err(e);
+        }
+    }
 
     // ------ Phase 3: AI Workers (Semaphore=3) ------
     eprintln!("[Pipeline 3/4] AI Workers...");
-    let _ai_ok = run_ai_workers(ai_config.clone(), semaphore.clone()).await?;
+    emit_pipeline_progress(app, 3, "started", "AI 提纯章节细纲…".to_string(), None);
+    match run_ai_workers(ai_config.clone(), semaphore.clone()).await {
+        Ok(n) => emit_pipeline_progress(app, 3, "completed",
+            format!("Phase 3 完成：提纯 {} 章", n),
+            Some((n, n))),
+        Err(e) => {
+            emit_pipeline_progress(app, 3, "failed", format!("Phase 3 失败: {}", e), None);
+            return Err(e);
+        }
+    }
 
     // ------ Phase 4: Multi-Agent Review (Semaphore=3) ------
     eprintln!("[Pipeline 4/4] Multi-Agent Review...");
-    if let Err(e) = run_multi_agent_phase(&books, ai_config, semaphore.clone()).await {
-        eprintln!("[Pipeline 4/4] Multi-Agent 阶段错误（不阻塞流水线）: {}", e);
+    emit_pipeline_progress(app, 4, "started",
+        format!("多 Agent 评估 ({} 本)", books.len()),
+        Some((0, books.len())));
+    match run_multi_agent_phase(&books, ai_config, semaphore.clone()).await {
+        Ok((ok, fail)) => emit_pipeline_progress(app, 4, "completed",
+            format!("Phase 4 完成：评估 {} 本 / 失败 {} 本", ok, fail),
+            Some((ok, ok + fail))),
+        Err(e) => {
+            eprintln!("[Pipeline 4/4] Multi-Agent 阶段错误（不阻塞流水线）: {}", e);
+            emit_pipeline_progress(app, 4, "failed", format!("Phase 4 错误: {}", e), None);
+        }
     }
 
     // ------ 快照 + 速度分析 ------
@@ -619,6 +743,15 @@ pub async fn run_full_analysis_pipeline(
     eprintln!("========== Pipeline 完成: {:.1}s ==========",
         elapsed.num_seconds() as f64 + elapsed.num_milliseconds() as f64 / 1000.0);
 
-    let report = generate_report(rank_url).await?;
+    let report = match mode {
+        PipelineMode::Rank => generate_report(target_url).await?,
+        PipelineMode::Single => {
+            let title = books.first().map(|(_, _, t, _)| t.clone()).unwrap_or_default();
+            format!(
+                "# 📖 单本拆解: 《{}》\n\n- URL: {}\n- 已写入数据库\n",
+                title, target_url,
+            )
+        }
+    };
     Ok(report)
 }

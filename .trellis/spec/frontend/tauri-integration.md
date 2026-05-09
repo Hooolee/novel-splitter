@@ -106,9 +106,34 @@ onUnmounted(() => {
 
 | 事件名 | Payload 类型 | 说明 |
 |--------|-------------|------|
-| `download-progress` | `{ current: number, total: number, chapter: string }` | 下载进度 |
-| `ai-analysis` | `{ content: string }` | AI 流式响应 |
-| `ai-analysis-status` | `{ status: string, message: string }` | AI 状态 |
+| `download-progress` | `{ current: number, total: number, chapter: string }` | V1 下载进度（老命令 `start_download` / `scan_and_download_rank` 发，UI 不再绑定） |
+| `ai-analysis` | `{ content: string }` | AI 流式响应（单本拆书） |
+| `ai-analysis-status` | `{ status: string, message: string }` | AI 状态（单本拆书） |
+| `pipeline-progress` | `{ phase: number, status: 'started'\|'completed'\|'failed', message: string, progress: [number, number] \| null }` | V2.0 流水线阶段事件，phase ∈ 1..=4：1=Producer 扫榜/单本元数据，2=Fetch 抓章节，3=AI 提纯，4=Multi-Agent 评估。`progress` 为 `(done, total)` 元组或 null |
+| `report-generated` | `()` | V2.0 流水线最终完成信号（前端用作 isDownloading reset） |
+
+### `pipeline-progress` 监听示例
+
+```typescript
+interface PipelineProgress {
+    phase: number;
+    status: 'started' | 'completed' | 'failed';
+    message: string;
+    progress: [number, number] | null;
+}
+
+const currentPhase = ref<PipelineProgress | null>(null);
+
+listen<PipelineProgress>('pipeline-progress', (event) => {
+    currentPhase.value = event.payload;
+    // 在 phase 2 completed 时刷文件树
+    if (event.payload.phase === 2 && event.payload.status === 'completed') {
+        refreshTreeFiles();
+    }
+});
+```
+
+事件来源：`src-tauri/src/analysis_engine.rs::run_full_analysis_pipeline` 在每个 Phase 边界 emit。
 
 ## 文件操作模式
 

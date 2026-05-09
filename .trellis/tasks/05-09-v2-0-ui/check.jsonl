@@ -1,0 +1,12 @@
+{"file": ".trellis/spec/frontend/quality.md", "reason": "前端质量基线与提交前检查清单"}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "校验 PipelineProgress 类型、无 any、监听 payload 类型化"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "校验 V1 download Tab 相关 ref 已彻底清理（无悬挂引用）、新增 ref 命名/作用域合理"}
+{"file": ".trellis/spec/frontend/tauri-integration.md", "reason": "校验 invoke 调用 + listen 注册/卸载是否合规（onMounted/onUnmounted 配对）"}
+{"file": ".trellis/spec/frontend/components.md", "reason": "校验新增模态框/按钮组件是否符合 SFC + script setup 规范"}
+{"file": ".trellis/spec/frontend/css-layout.md", "reason": "校验 Tab 切换器从 3 收 2 的样式是否正确、模态框是否符合现有皮肤变量"}
+{"file": ".trellis/spec/backend/quality.md", "reason": "后端 emit 改动的质量基线"}
+{"file": ".trellis/spec/backend/tauri-commands.md", "reason": "校验 trigger_full_scan 单本路径分支与 emit pipeline-progress 是否合规"}
+{"file": ".trellis/spec/backend/logging.md", "reason": "校验 Phase 边界日志/事件风格与任务一/二一致"}
+{"file": ".trellis/spec/guides/testing-responsibility.md", "reason": "复核 UI 删除自测 + pipeline_e2e 是否覆盖单本路径"}
+{"file": ".trellis/spec/guides/pre-implementation-checklist.md", "reason": "对照 checklist 复核完成度"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "复核前后端事件协议一致性、payload 字段对齐"}

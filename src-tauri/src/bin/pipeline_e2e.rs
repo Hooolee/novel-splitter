@@ -174,9 +174,16 @@ fn main() {
     eprintln!("  ┌─────────────────────────────────────────────────────────┐");
     eprintln!("  │  npm run tauri dev                                      │");
     eprintln!("  │  → 打开 App 后在左下角⚙️确认 AI 配置             │");
-    eprintln!("  │  → 切到「报告」Tab → 选榜单 → 点「立即扫榜」  │");
-    eprintln!("  │  → 观察终端输出 [Pipeline 1/4] [2/4] [3/4] [4/4]      │");
+    eprintln!("  │  ▶ 榜单路径: 切到「报告」Tab → 选榜单 → 立即扫榜");
+    eprintln!("  │  ▶ 单本路径: 「书库」Tab → + 添加书籍 → 输入 URL ");
+    eprintln!("  │  → 观察终端输出 [Pipeline (Rank|Single) 1/4] ... [4/4] ");
+    eprintln!("  │  → 观察底部状态栏 Phase X/4 阶段实时更新                ");
     eprintln!("  └─────────────────────────────────────────────────────────┘");
+    eprintln!("\n  PipelineMode 枚举校验（编译时保证）: Rank | Single");
+    let _modes: [fanqie_app_lib::analysis_engine::PipelineMode; 2] = [
+        fanqie_app_lib::analysis_engine::PipelineMode::Rank,
+        fanqie_app_lib::analysis_engine::PipelineMode::Single,
+    ];
 
     // 6. 清理
     if std::env::var("SKIP_CLEANUP").is_err() {
