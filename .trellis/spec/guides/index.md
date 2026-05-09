@@ -10,6 +10,7 @@
 |------|------|----------|
 | [跨层思维](./cross-layer-thinking-guide.md) | 思考前端-后端-Tauri 层之间的数据流 | 实现跨越 2+ 层的功能前 |
 | [实现前检查清单](./pre-implementation-checklist.md) | 验证编码前的准备工作 | 开始任何功能实现前 |
+| [测试责任规范](./testing-responsibility.md) | 自动化测试策略与责任边界 | 实现任何功能时 |
 
 ## 核心原则
 

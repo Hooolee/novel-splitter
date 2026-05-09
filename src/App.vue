@@ -157,6 +157,9 @@ async function selectWorkspaceDir() {
             // Ensure subdirectories exist
             await invoke("ensure_workspace_dirs", { workspaceRoot: selected });
 
+            // 同步工作目录到后端（系统托盘/调度器使用同一路径）
+            await invoke("set_workspace_root", { root: selected });
+
             // Refresh file tree
             await refreshTreeFiles();
         }
@@ -207,7 +210,13 @@ function cycleTheme() {
 
 // --- Logic ---
 
-onMounted(() => {
+onMounted(async () => {
+    // 同步工作目录到后端（确保托盘/调度器使用同一路径）
+    const savedRoot = localStorage.getItem('workspace_root');
+    if (savedRoot) {
+        try { await invoke("set_workspace_root", { root: savedRoot }); } catch (e) { /* ignore */ }
+    }
+
     // Listen for AI Streaming
     listen('ai-analysis', (event: any) => {
         splitContent.value += event.payload.chunk;
@@ -982,13 +991,25 @@ function formatReportName(filename: string): string {
             <div class="relative w-full">
                 <select v-model="selectedRank" class="w-full appearance-none bg-subtle border border-border-dim text-txt text-[12px] rounded-lg pl-4 pr-10 py-2.5 outline-none focus:border-accent focus:ring-1 focus:ring-accent/30 transition-all cursor-pointer shadow-sm">
                     <option value="">(按配置 workflow_config.json 批量扫榜)</option>
-                    <optgroup label="起点榜单" class="bg-subtle text-txt">
-                        <option value="qidian:https://www.qidian.com/rank/hotsales/">起点畅销榜</option>
-                        <option value="qidian:https://www.qidian.com/rank/yuepiao/">起点月票榜</option>
-                        <option value="qidian:https://www.qidian.com/rank/newbook/">起点新书榜</option>
-                        <option value="qidian:https://www.qidian.com/rank/newsign/">起点签约榜</option>
-                        <option value="qidian:https://www.qidian.com/rank/recom/">起点推荐榜</option>
-                        <option value="qidian:https://www.qidian.com/rank/sanjiang/">起点三江榜</option>
+                    <optgroup label="起点·热门排行" class="bg-subtle text-txt">
+                        <option value="qidian:https://www.qidian.com/rank/hotsales/">畅销榜</option>
+                        <option value="qidian:https://www.qidian.com/rank/yuepiao/">月票榜</option>
+                        <option value="qidian:https://www.qidian.com/rank/readindex/">阅读指数榜</option>
+                        <option value="qidian:https://www.qidian.com/rank/recom/">推荐榜</option>
+                        <option value="qidian:https://www.qidian.com/rank/newfans/">书友榜</option>
+                        <option value="qidian:https://www.qidian.com/rank/collect/">收藏榜</option>
+                        <option value="qidian:https://www.qidian.com/rank/vipup/">更新榜</option>
+                        <option value="qidian:https://www.qidian.com/rank/vipcollect/">VIP收藏榜</option>
+                    </optgroup>
+                    <optgroup label="起点·新书排行" class="bg-subtle text-txt">
+                        <option value="qidian:https://www.qidian.com/rank/signnewbook/">签约作者新书榜</option>
+                        <option value="qidian:https://www.qidian.com/rank/pubnewbook/">公众作者新书榜</option>
+                        <option value="qidian:https://www.qidian.com/rank/newsign/">新人签约新书榜</option>
+                        <option value="qidian:https://www.qidian.com/rank/newauthor/">新人作者新书榜</option>
+                    </optgroup>
+                    <optgroup label="起点·其他排行" class="bg-subtle text-txt">
+                        <option value="qidian:https://www.qidian.com/rank/mm/">女生精选榜</option>
+                        <option value="qidian:https://www.qidian.com/rank/mm/yuepiao/">女生月票榜</option>
                     </optgroup>
                     <optgroup label="番茄榜单 (开发中)" class="bg-subtle text-txt">
                         <option value="fanqie:https://fanqienovel.com/rank/1_2_1141">番茄男频阅读榜</option>

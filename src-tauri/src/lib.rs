@@ -1,13 +1,17 @@
-mod spiders;
-mod ai;
-mod browser_spider;
-mod scheduler;
-mod analysis_engine;
+pub mod spiders;
+pub mod ai;
+pub mod browser_spider;
+pub mod scheduler;
+pub mod analysis_engine;
 pub mod db;
+
+#[cfg(test)]
+mod tests;
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
+use std::sync::Mutex;
 use tauri::{Emitter, Manager};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
@@ -194,18 +198,14 @@ async fn trigger_full_scan_internal(app_handle: &tauri::AppHandle, target_url: O
     println!("Manual trigger from frontend/tray: scan started");
     let project_root = get_project_root();
     let config_path = project_root.join("workflow_config.json");
-    
+
     let content = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
     let config = serde_json::from_str::<serde_json::Value>(&content).map_err(|e| e.to_string())?;
-    
-    let ai_config = crate::ai::AiConfig {
-        api_base: config["ai"]["api_base"].as_str().unwrap_or_default().to_string(),
-        api_key: config["ai"]["api_key"].as_str().unwrap_or_default().to_string(),
-        model: config["ai"]["model"].as_str().unwrap_or_default().to_string(),
-    };
-    let workspace_root_buf = project_root.clone();
-    let workspace_root = workspace_root_buf.as_path();
-    let mut aggregated_report = format!("# 手动全量扫榜深度报告 ({})\n\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+
+    // 从 Tauri State 读取工作目录（与前端选择一致）
+    let workspace_root = get_workspace_root(app_handle);
+    let mut aggregated_report = String::new();
+    let mut any_success = false;
 
     if let Some(target) = target_url {
         let platform = platform_opt.unwrap_or_else(|| {
@@ -213,9 +213,10 @@ async fn trigger_full_scan_internal(app_handle: &tauri::AppHandle, target_url: O
         });
         println!("Manual: Triggering analysis for specific target {} on platform {}", target, platform);
         match crate::analysis_engine::run_full_analysis_pipeline(
-            app_handle, &target, &platform, ai_config.clone(), workspace_root
+            app_handle, &target, &platform, &workspace_root
         ).await {
             Ok(partial) => {
+                any_success = true;
                 aggregated_report.push_str(&partial);
                 aggregated_report.push_str("\n\n---\n\n");
             }
@@ -229,9 +230,10 @@ async fn trigger_full_scan_internal(app_handle: &tauri::AppHandle, target_url: O
                     let platform = if rank_url.contains("fanqie") { "fanqie" } else { "qidian" };
                     println!("Manual: Triggering analysis for {}", rank_url);
                     match crate::analysis_engine::run_full_analysis_pipeline(
-                        app_handle, rank_url, platform, ai_config.clone(), workspace_root
+                        app_handle, rank_url, platform, &workspace_root
                     ).await {
                         Ok(partial) => {
+                            any_success = true;
                             println!("Manual: Done for {}", rank_url);
                             aggregated_report.push_str(&partial);
                             aggregated_report.push_str("\n\n---\n\n");
@@ -248,49 +250,42 @@ async fn trigger_full_scan_internal(app_handle: &tauri::AppHandle, target_url: O
         }
     }
     
-    let reports_dir = workspace_root.join("reports");
-    let _ = std::fs::create_dir_all(&reports_dir);
-    let report_path = reports_dir.join(format!("manual_report_{}.md", chrono::Local::now().format("%Y%m%d_%H%M%S")));
-    let _ = std::fs::write(report_path, aggregated_report);
-    println!("Manual pipeline fully complete.");
-    
+    if any_success {
+        let full_report = format!("# 手动全量扫榜深度报告 ({})\n\n{}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            aggregated_report);
+        let reports_dir = workspace_root.join("reports");
+        let _ = std::fs::create_dir_all(&reports_dir);
+        let report_path = reports_dir.join(format!("manual_report_{}.md", chrono::Local::now().format("%Y%m%d_%H%M%S")));
+        let _ = std::fs::write(report_path, full_report);
+        println!("Manual pipeline: report saved.");
+    } else {
+        println!("Manual pipeline: all targets failed, no report saved.");
+    }
+
     // 发送事件通知前端更新列表
     let _ = app_handle.emit("report-generated", ());
-    
+
     Ok(())
 }
 
 #[tauri::command]
-async fn update_ai_config(api_base: String, api_key: String, model: String) -> Result<(), String> {
-    let project_root = get_project_root();
-    let config_path = project_root.join("workflow_config.json");
-    
-    let mut config = if config_path.exists() {
-        let content = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
-        serde_json::from_str::<serde_json::Value>(&content).unwrap_or(serde_json::json!({}))
-    } else {
-        serde_json::json!({})
-    };
-
-    if !config.is_object() {
-        config = serde_json::json!({});
-    }
-
-    if config.get("ai").is_none() {
-        config["ai"] = serde_json::json!({});
-    }
-
-    config["ai"]["api_base"] = serde_json::Value::String(api_base);
-    config["ai"]["api_key"] = serde_json::Value::String(api_key);
-    config["ai"]["model"] = serde_json::Value::String(model);
-
-    let content = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-    std::fs::write(&config_path, content).map_err(|e| e.to_string())?;
-    
-    println!("Updated AI config in workflow_config.json");
+async fn set_workspace_root(app: tauri::AppHandle, root: String) -> Result<(), String> {
+    let state = app.state::<crate::ai::GlobalWorkspaceRoot>();
+    *state.0.lock().map_err(|e| e.to_string())? = root;
     Ok(())
 }
 
+#[tauri::command]
+async fn update_ai_config(app: tauri::AppHandle, api_base: String, api_key: String, model: String) -> Result<(), String> {
+    let config = crate::ai::AiConfig { api_base, api_key, model };
+    let state = app.state::<crate::ai::GlobalAiConfig>();
+    *state.0.lock().map_err(|e| e.to_string())? = Some(config);
+    println!("AI config updated via frontend settings");
+    Ok(())
+}
+
+#[cfg(not(test))]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -312,6 +307,12 @@ pub fn run() {
                 Ok(_) => println!("Database initialized at {:?}", db_path),
                 Err(e) => eprintln!("Failed to initialize database: {}", e),
             }
+
+            // 0.5 注册全局状态
+            app.manage(ai::GlobalAiConfig(Mutex::new(None)));
+            app.manage(ai::GlobalWorkspaceRoot(Mutex::new(
+                get_project_root().to_string_lossy().to_string()
+            )));
 
             // 1. 创建托盘菜单
             let quit_i = MenuItem::with_id(app, "quit", "退出应用", true, None::<&str>)?;
@@ -373,7 +374,8 @@ pub fn run() {
             list_reports,
             read_report,
             trigger_full_scan,
-            update_ai_config
+            update_ai_config,
+            set_workspace_root
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -387,7 +389,7 @@ struct ProgressPayload {
 }
 
 // Helper to get project root directory (parent of src-tauri)
-fn get_project_root() -> std::path::PathBuf {
+pub fn get_project_root() -> std::path::PathBuf {
     // Get current exe directory, then go up to find project root
     if let Ok(exe_path) = std::env::current_exe() {
         // In development: exe is in target/debug/
@@ -409,6 +411,13 @@ fn get_project_root() -> std::path::PathBuf {
     }
     // Fallback: use current directory
     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
+pub fn get_workspace_root(app: &tauri::AppHandle) -> std::path::PathBuf {
+    let state = app.state::<crate::ai::GlobalWorkspaceRoot>();
+    state.0.lock()
+        .map(|g| std::path::PathBuf::from(g.clone()))
+        .unwrap_or_else(|_| get_project_root())
 }
 
 // Helper for file logging (shared across modules)

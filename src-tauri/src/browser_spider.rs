@@ -118,15 +118,19 @@ pub async fn fetch_via_window(app: &AppHandle, url: &str, debug_visible: bool) -
         let _window = window_builder.build().map_err(|e| format!("Failed to create window: {}", e))?;
     }
 
-    // Wait for result with timeout
+    // Wait for result with timeout (可配置)
+    let timeout_secs = std::env::var("SPIDER_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(60);
     let result = tokio::select! {
         res = rx => {
             app.unlisten(event_id);
             res.map_err(|_| "Channel closed".to_string())?
         }
-        _ = tokio::time::sleep(Duration::from_secs(45)) => {
+        _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => {
             app.unlisten(event_id);
-            Err("Timeout waiting for spider".to_string())
+            Err(format!("Timeout waiting for spider ({}s)", timeout_secs))
         }
     };
     

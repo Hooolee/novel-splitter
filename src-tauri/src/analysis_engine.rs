@@ -2,7 +2,11 @@ use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use chrono::Local;
+use tauri::Manager;
+use tokio::sync::Semaphore;
+use tokio::time::{sleep, Duration};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct NovelRankInfo {
@@ -30,7 +34,6 @@ impl HistoryManager {
         Self { base_dir }
     }
 
-    // 保存今日快照
     pub fn save_snapshot(&self, novels: &Vec<NovelRankInfo>) -> Result<(), String> {
         let today = Local::now().format("%Y-%m-%d").to_string();
         let file_path = self.base_dir.join(format!("snapshot_{}.json", today));
@@ -38,7 +41,6 @@ impl HistoryManager {
         fs::write(file_path, content).map_err(|e| e.to_string())
     }
 
-    // 读取指定日期的快照
     pub fn load_snapshot(&self, date_str: &str) -> Option<Vec<NovelRankInfo>> {
         let file_path = self.base_dir.join(format!("snapshot_{}.json", date_str));
         if let Ok(content) = fs::read_to_string(file_path) {
@@ -48,7 +50,6 @@ impl HistoryManager {
         }
     }
 
-    // 获取昨日快照日期 (简单逻辑)
     pub fn get_yesterday_date(&self) -> String {
         use chrono::Duration;
         let yesterday = Local::now() - Duration::days(1);
@@ -74,247 +75,418 @@ pub fn calculate_velocity(current_list: &mut Vec<NovelRankInfo>, last_list: Opti
     }
 }
 
-// 核心流水线实现
+// ---------- AI 提纯提示词：输出 JSON 细纲 ----------
+const OUTLINE_ANALYSIS_PROMPT: &str = r#"你是一个专业网文拆解助手。
+请将以下小说章节内容拆解为细纲，严格按照原文叙事顺序。
+
+对于每个关键情节节点，输出一个 JSON 对象数组：
+
+[
+  {
+    "event": "剧情概括（一句话描述该节点发生的事件）",
+    "purpose": "写作目的（如：制造冲突、拉高期待、压抑情绪、展示金手指、打脸爽点、埋下伏笔、转换地图、引入新角色等）",
+    "emotion": "该段落的主要情绪基调（如：紧张、兴奋、压抑、爽快、悬疑、温馨、热血等）",
+    "highlight": "核心看点/吸引点（读者为什么会被这段吸引）"
+  }
+]
+
+要求：
+1. 严格按原文顺序
+2. 每个节点 1-3 句话
+3. 只输出 JSON 数组，不要任何额外文字
+4. 如果无法拆解请输出 []"#;
+
+const MAX_CONCURRENCY: usize = 3;
+const TARGET_CHAPTERS: usize = 3;
+
+// ========================================================================
+//  Phase 1: Producer — 扫榜分发, 只取 book_id + 书名 + URL
+// ========================================================================
+async fn producer_scan_rank(
+    app: &tauri::AppHandle,
+    rank_url: &str,
+    platform: &str,
+) -> Result<Vec<(i64, String, String, String)>, String> {
+    eprintln!("[Producer] 扫榜: {}", rank_url);
+
+    let novel_links = match platform {
+        "qidian" => crate::spiders::qidian::fetch_rank_list(app, rank_url, false).await?,
+        "fanqie" => return Err("番茄榜单暂未实现".to_string()),
+        _ => return Err("不支持的平台".to_string()),
+    };
+
+    let max_books = std::env::var("PIPELINE_MAX_BOOKS").ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(30);
+    let limit = std::cmp::min(novel_links.len(), max_books);
+    if limit == 0 {
+        return Err("榜单中没有找到小说".to_string());
+    }
+
+    // 扫榜成功后创建报告（避免空报告）
+    let db_conn = crate::db::get_conn().ok();
+    let mut report_id_opt = None;
+    if let Some(ref conn) = db_conn {
+        match crate::db::create_scan_report(conn, rank_url) {
+            Ok(rid) => report_id_opt = Some(rid),
+            Err(e) => eprintln!("[Producer] DB: 创建报告失败: {}", e),
+        }
+    }
+
+    let client = reqwest::Client::new();
+    let mut results = Vec::new();
+
+    for (idx, url) in novel_links.iter().enumerate().take(limit) {
+        let book_id = url.split("/book/")
+            .last()
+            .unwrap_or(url)
+            .trim_end_matches('/')
+            .to_string();
+
+        let (title, author, tags) = match platform {
+            "qidian" => {
+                match crate::spiders::qidian::fetch_novel_metadata(&client, url, app, false).await {
+                    Ok(meta) => (meta.title.clone(), "未知".to_string(), meta.tags.join(",")),
+                    Err(e) => {
+                        eprintln!("[Producer] 获取元数据失败 [{}]: {}", url, e);
+                        (format!("未知书籍-{}", idx + 1), "未知".to_string(), String::new())
+                    }
+                }
+            }
+            _ => (format!("未知书籍-{}", idx + 1), "未知".to_string(), String::new()),
+        };
+
+        if let Some(ref conn) = db_conn {
+            match crate::db::upsert_novel(conn, &book_id, platform, &title, &author, &tags, 0) {
+                Ok(nid) => {
+                    if let Some(rid) = report_id_opt {
+                        let change_str = format!("+{}", idx + 1);
+                        let _ = crate::db::insert_rank_history(conn, rid, nid, (idx + 1) as i64, &change_str);
+                    }
+                    results.push((nid, book_id.clone(), title.clone(), url.clone()));
+                    eprintln!("[Producer] #{}/{} id={} title={}", idx + 1, limit, book_id, title);
+                }
+                Err(e) => eprintln!("[Producer] DB 写入失败: {}", e),
+            }
+        }
+    }
+
+    eprintln!("[Producer] 完成: 扫到 {} 本书", results.len());
+    Ok(results)
+}
+
+// ========================================================================
+//  Phase 2: Fetch Worker — 并发抓取章节 (Semaphore=3, 按书粒度)
+// ========================================================================
+async fn run_fetch_workers(
+    app: &tauri::AppHandle,
+    books: Vec<(i64, String, String)>,
+    platform: &str,
+    workspace_root: &Path,
+    semaphore: Arc<Semaphore>,
+) -> Result<(usize, usize), String> {
+    if books.is_empty() {
+        eprintln!("[Fetch Worker] 没有待抓取的小说");
+        return Ok((0, 0));
+    }
+
+    eprintln!("[Fetch Worker] {} 本待抓取, Semaphore({}) 并发", books.len(), MAX_CONCURRENCY);
+
+    let download_dir = workspace_root.join("downloads");
+    let mut handles = Vec::new();
+
+    for (novel_id, title, novel_url) in books {
+        let permit = semaphore.clone().acquire_owned().await.map_err(|e| e.to_string())?;
+        let app = app.clone();
+        let d_dir = download_dir.clone();
+        let plat = platform.to_string();
+
+        handles.push(tokio::spawn(async move {
+            let _permit = permit;
+            let safe_title = title.replace("/", "_").replace("\\", "_");
+            let novel_dir = d_dir.join(&safe_title);
+            let _ = fs::create_dir_all(&novel_dir);
+
+            let chapters = match plat.as_str() {
+                "qidian" => crate::spiders::qidian::fetch_chapter_list(&app, &novel_url, false).await,
+                _ => Err("不支持的平台".to_string()),
+            };
+
+            let chapters = match chapters {
+                Ok(list) => list,
+                Err(e) => {
+                    eprintln!("[Fetch Worker] 获取章节列表失败 {}: {}", title, e);
+                    return (0usize, 1usize);
+                }
+            };
+
+            let mut success = 0usize;
+            let mut fail = 0usize;
+            let target = std::cmp::min(chapters.len(), TARGET_CHAPTERS);
+
+            for i in 0..target {
+                if i >= chapters.len() { break; }
+                let (ch_title, ch_url) = &chapters[i];
+                let filename = format!("{:02}.txt", i + 1);
+                let file_path = novel_dir.join(&filename);
+
+                if file_path.exists() {
+                    success += 1;
+                    continue;
+                }
+
+                let download = match plat.as_str() {
+                    "qidian" => crate::spiders::qidian::download_chapter(&app, ch_url, false).await,
+                    _ => Err("不支持的平台".to_string()),
+                };
+
+                match download {
+                    Ok((_, content)) => {
+                        let full = format!("标题: {}\n链接: {}\n{}\n\n{}", ch_title, ch_url, "=".repeat(50), content);
+                        let _ = fs::write(&file_path, &full);
+
+                        if let Ok(conn) = crate::db::get_conn() {
+                            let _ = crate::db::upsert_chapter(&conn, novel_id, (i + 1) as i64, ch_title, &content, None);
+                        }
+                        success += 1;
+                    }
+                    Err(e) => {
+                        eprintln!("[Fetch Worker] 下载章节失败 {}: {}", ch_title, e);
+                        fail += 1;
+                    }
+                }
+
+                sleep(Duration::from_millis(200)).await;
+            }
+
+            eprintln!("[Fetch Worker] {} 完成: 成功{} 失败{}", title, success, fail);
+            (success, fail)
+        }));
+    }
+
+    let mut total_ok = 0usize;
+    let mut total_fail = 0usize;
+    for h in handles {
+        let (ok, fail) = h.await.unwrap_or((0, 1));
+        total_ok += ok;
+        total_fail += fail;
+    }
+
+    eprintln!("[Fetch Worker] 全部完成: 总成功{} 总失败{}", total_ok, total_fail);
+    Ok((total_ok, total_fail))
+}
+
+// ========================================================================
+//  Phase 3: AI Worker — 并发 AI 提纯 (Semaphore=3, 按章粒度)
+// ========================================================================
+async fn run_ai_workers(
+    ai_config: crate::ai::AiConfig,
+    semaphore: Arc<Semaphore>,
+) -> Result<usize, String> {
+    let pending: Vec<(i64, String, String)> = {
+        let conn = crate::db::get_conn().map_err(|e| format!("DB 连接失败: {}", e))?;
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.title, c.content FROM chapters c
+             WHERE c.outline_json IS NULL AND c.content IS NOT NULL AND c.content != ''
+             LIMIT 50"
+        ).map_err(|e| e.to_string())?;
+
+        let items = stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        }).map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect::<Vec<_>>();
+        items
+    };
+
+    if pending.is_empty() {
+        eprintln!("[AI Worker] 没有待提纯的章节");
+        return Ok(0);
+    }
+
+    eprintln!("[AI Worker] {} 章节待提纯, Semaphore({}) 并发", pending.len(), MAX_CONCURRENCY);
+
+    let prompt = OUTLINE_ANALYSIS_PROMPT.to_string();
+    let mut handles = Vec::new();
+
+    for (ch_id, title, content) in pending {
+        let permit = semaphore.clone().acquire_owned().await.map_err(|e| e.to_string())?;
+        let config = ai_config.clone();
+        let prompt = prompt.clone();
+
+        handles.push(tokio::spawn(async move {
+            let _permit = permit;
+
+            // 按 char 边界安全截断中文内容
+            let truncated = if content.len() > 8000 {
+                let boundary = content.char_indices()
+                    .nth(4000)
+                    .map(|(i, _)| i)
+                    .unwrap_or(content.len());
+                content[..boundary].to_string()
+            } else {
+                content
+            };
+
+            match crate::ai::call_ai(config, prompt, truncated, true).await {
+                Ok(json_str) => {
+                    match serde_json::from_str::<serde_json::Value>(&json_str) {
+                        Ok(_) => {
+                            if let Ok(conn) = crate::db::get_conn() {
+                                let _ = conn.execute(
+                                    "UPDATE chapters SET outline_json = ?1 WHERE id = ?2",
+                                    rusqlite::params![json_str, ch_id],
+                                );
+                            }
+                            eprintln!("[AI Worker] ✅ {} 提纯完成", title);
+                            1usize
+                        }
+                        Err(e) => {
+                            eprintln!("[AI Worker] ⚠️ {} JSON 校验失败: {}", title, e);
+                            0usize
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[AI Worker] ❌ {} AI 调用失败: {}", title, e);
+                    0usize
+                }
+            }
+        }));
+    }
+
+    let mut total = 0usize;
+    for h in handles {
+        total += h.await.unwrap_or(0);
+    }
+
+    eprintln!("[AI Worker] 全部完成: 成功提纯 {} 章", total);
+    Ok(total)
+}
+
+// ========================================================================
+//  报告生成 — 从 DB 读取数据生成 Markdown
+// ========================================================================
+async fn generate_report(rank_url: &str) -> Result<String, String> {
+    let conn = crate::db::get_conn().map_err(|e| format!("DB 连接失败: {}", e))?;
+
+    let mut report_stmt = conn.prepare(
+        "SELECT id FROM scan_reports WHERE rank_type = ?1 ORDER BY id DESC LIMIT 1"
+    ).map_err(|e| e.to_string())?;
+    let report_id: i64 = report_stmt.query_row([rank_url], |row| row.get(0))
+        .map_err(|_| "未找到扫榜报告".to_string())?;
+
+    let mut stmt = conn.prepare(
+        "SELECT n.title, n.book_id, n.tags, rh.rank, rh.rank_change
+         FROM rank_history rh
+         JOIN novels n ON n.id = rh.novel_id
+         WHERE rh.report_id = ?1
+         ORDER BY rh.rank ASC"
+    ).map_err(|e| e.to_string())?;
+
+    let rows: Vec<(String, String, String, i64, String)> = stmt.query_map([report_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    }).map_err(|e| e.to_string())?
+    .filter_map(|r| r.ok())
+    .collect();
+
+    if rows.is_empty() {
+        return Ok(format!("# 📊 榜单分析: {}\n\n> ⚠️ 未在榜单中发现小说\n", rank_url));
+    }
+
+    let mut report = format!("# 📊 榜单分析: {}\n\n**扫榜时间**: {}\n**上榜小说**: {} 本\n\n",
+        rank_url,
+        Local::now().format("%Y-%m-%d %H:%M"),
+        rows.len(),
+    );
+
+    for (title, book_id, tags, rank, change) in &rows {
+        report.push_str(&format!(
+            "### #{}. 《{}》 (变动: {})\n> book_id: `{}` | tags: {}\n\n",
+            rank, title, change, book_id, tags,
+        ));
+    }
+
+    Ok(report)
+}
+
+// ========================================================================
+//  核心公开 API — 三段式管线 + 全局 AI 配置
+// ========================================================================
 pub async fn run_full_analysis_pipeline(
     app: &tauri::AppHandle,
     rank_url: &str,
     platform: &str,
-    ai_config: crate::ai::AiConfig,
     workspace_root: &Path,
 ) -> Result<String, String> {
-    println!("Pipeline: Starting analysis for {}", rank_url);
-    
-    let history = HistoryManager::new(workspace_root);
-    let last_list = history.load_snapshot(&history.get_yesterday_date());
-    
-    // 1. 扫榜获取全量列表
-    let novel_links = match platform {
-        "qidian" => crate::spiders::qidian::fetch_rank_list(app, rank_url, false).await?,
-        "fanqie" => return Err("Fanqie rank not implemented".to_string()),
-        _ => return Err("Unsupported platform".to_string()),
+    eprintln!("\n========== Pipeline: {} ==========", rank_url);
+    let started = Local::now();
+
+    // 从 Tauri 全局状态读取 AI 配置（由前端 UI 设置）
+    let ai_config = {
+        let state = app.state::<crate::ai::GlobalAiConfig>();
+        let guard = state.0.lock().map_err(|e| format!("获取 AI 配置失败: {}", e))?;
+        guard.clone().ok_or_else(|| "AI 配置未设置，请在设置中配置 API Key".to_string())?
     };
+    let db_conn = crate::db::get_conn().ok();
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENCY));
 
-    let mut current_novels = Vec::new();
-    let client = reqwest::Client::new();
-
-    // 2. 建立临时数据结构并计算增量
-    for (idx, url) in novel_links.iter().enumerate() {
-        let book_id = url.split("/book/").last().unwrap_or(url).to_string();
-        current_novels.push(NovelRankInfo {
-            book_id,
-            title: "".to_string(),
-            url: url.clone(),
-            rank: idx + 1,
-            last_rank: None,
-            rank_change: 0,
-            is_new: false,
-            metadata: None,
-            ai_analysis: None,
-        });
+    // ------ Phase 1: Producer ------
+    eprintln!("[Pipeline 1/3] Producer...");
+    let books = producer_scan_rank(app, rank_url, platform).await?;
+    if books.is_empty() {
+        return Err("Producer 未扫到有效书籍".to_string());
     }
 
-    // [DB] 尝试连接数据库并创建本次扫描报告的记录
-    let db_conn_opt = crate::db::get_conn().ok();
-    let mut report_id_opt = None;
-    if let Some(ref conn) = db_conn_opt {
-        match crate::db::create_scan_report(conn, rank_url) {
-            Ok(rid) => report_id_opt = Some(rid),
-            Err(e) => eprintln!("Pipeline DB Error: Failed to create scan report: {}", e),
-        }
-    }
-
-    calculate_velocity(&mut current_novels, last_list.clone());
-    println!("Pipeline: Scanned {} novels. Start analyzing top 30...", current_novels.len());
-
-    // 缓存索引
-    let last_analysis_map: HashMap<String, serde_json::Value> = last_list
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|n| n.ai_analysis.map(|a| (n.book_id, a)))
+    // ------ Phase 2: Fetch Workers (Semaphore=3) ------
+    eprintln!("[Pipeline 2/3] Fetch Workers...");
+    let fetch_list: Vec<(i64, String, String)> = books.iter()
+        .map(|(id, _, title, url)| (*id, title.clone(), url.clone()))
         .collect();
+    let (_ch_ok, _ch_fail) = run_fetch_workers(
+        app, fetch_list, platform, workspace_root, semaphore.clone()
+    ).await?;
 
-    let target_limit = 30; // 榜单前 30
-    let mut report_segment = format!("## 📊 榜单分析: {}\n\n", rank_url);
+    // ------ Phase 3: AI Workers (Semaphore=3) ------
+    eprintln!("[Pipeline 3/3] AI Workers...");
+    let _ai_ok = run_ai_workers(ai_config, semaphore.clone()).await?;
 
-    if current_novels.is_empty() {
-        println!("Pipeline: Warning - No novels found for {}", rank_url);
-        report_segment.push_str("> ⚠️ 未能在该榜单中发现小说，请检查 URL 是否正确或是否存在反爬墙。\n\n");
-    }
-
-    let total_to_analyze = std::cmp::min(current_novels.len(), target_limit);
-    // 3. 逐一深度分析
-    for i in 0..total_to_analyze {
-        let novel = &mut current_novels[i];
-        println!("Pipeline: Analyzing novel #{}/{} - {}", i + 1, total_to_analyze, novel.url);
-        
-        // 尝试获取元数据以确定书名
-        match crate::spiders::qidian::fetch_novel_metadata(&client, &novel.url, app, false).await {
-            Ok(meta) => {
-                novel.title = meta.title.clone();
-                novel.metadata = Some(serde_json::to_value(&meta).unwrap());
-                
-                // [DB] 记录书籍静态信息和本次的快照
-                let mut novel_id_opt = None;
-                if let Some(ref conn) = db_conn_opt {
-                    let author = "未知".to_string(); // 暂时使用未知，后续在蜘蛛层补充
-                    let tags = meta.tags.join(",");
-                    // 尝试从字符串（例如 "32.4万字"）提取数字，这里暂时简化，如果解析失败默认给 0
-                    let word_count = 0; 
-                    match crate::db::upsert_novel(conn, &novel.book_id, platform, &novel.title, &author, &tags, word_count) {
-                        Ok(nid) => {
-                            novel_id_opt = Some(nid);
-                            if let Some(rid) = report_id_opt {
-                                let rank_change_str = if novel.is_new {
-                                    "+NEW".to_string()
-                                } else {
-                                    novel.rank_change.to_string()
-                                };
-                                let _ = crate::db::insert_rank_history(conn, rid, nid, novel.rank as i64, &rank_change_str);
-                            }
-                        },
-                        Err(e) => eprintln!("Pipeline DB Error: {}", e),
-                    }
-                }
-                
-                // 检查缓存
-                if let Some(cached_analysis) = last_analysis_map.get(&novel.book_id) {
-                    novel.ai_analysis = Some(cached_analysis.clone());
-                    let ai_report = cached_analysis.as_str().unwrap_or_default();
-                    report_segment.push_str(&format!("### [{}]《{}》 (排名: {}, 变动: {})\n", 
-                        if novel.is_new { "新上榜" } else { "稳坐" },
-                        novel.title, novel.rank, novel.rank_change));
-                    report_segment.push_str(&format!("> **微观拆解 (缓存)**: {}\n\n", ai_report));
-                } else {
-                    let mut combined_content = String::new();
-                    let mut use_local = false;
-                    
-                    let safe_title = novel.title.replace("/", "_").replace("\\", "_");
-                    let novel_dir = workspace_root.join("downloads").join(&safe_title);
-                    
-                    if novel_dir.exists() {
-                        let mut local_count = 0;
-                        for i in 1..=3 {
-                            let filename = format!("{:02}.txt", i);
-                            let chapter_path = novel_dir.join(&filename);
-                            if let Ok(content) = std::fs::read_to_string(&chapter_path) {
-                                combined_content.push_str(&content);
-                                combined_content.push_str("\n\n");
-                                local_count += 1;
-                            }
-                        }
-                        if local_count >= 3 {
-                            use_local = true;
-                        }
-                    }
-
-                    if use_local {
-                        println!("Pipeline: Using locally cached chapters for {}...", novel.title);
-                    } else {
-                        combined_content.clear();
-                        println!("Pipeline: Cache miss for {}. Fetching chapters from network...", novel.title);
-                        if let Ok(chapters) = crate::spiders::qidian::fetch_chapter_list(app, &novel.url, false).await {
-                            // 创建本地书库目录
-                            let _ = std::fs::create_dir_all(&novel_dir);
-                            // 写入 metadata.json 供前端书库识别
-                            if let Ok(meta_json) = serde_json::to_string_pretty(&meta) {
-                                let _ = std::fs::write(novel_dir.join("metadata.json"), meta_json);
-                            }
-                            
-                            let mut idx = 1;
-                            for (title, ch_url) in chapters.into_iter().take(3) {
-                                println!("  -> Downloading chapter: {}", title);
-                                if let Ok((_, content)) = crate::spiders::qidian::download_chapter(app, &ch_url, false).await {
-                                    let chapter_content = format!("{}\n\n{}", title, content);
-                                    combined_content.push_str(&format!("## {}\n\n", chapter_content));
-                                    // 写入单章文本
-                                    let _ = std::fs::write(novel_dir.join(format!("{:02}.txt", idx)), &chapter_content);
-                                    
-                                    // [DB] 存入数据库章节表
-                                    if let (Some(ref conn), Some(nid)) = (&db_conn_opt, novel_id_opt) {
-                                        let _ = crate::db::upsert_chapter(conn, nid, idx as i64, &title, &content, None);
-                                    }
-                                    
-                                    idx += 1;
-                                }
-                            }
-                        }
-                    }
-
-                    if !combined_content.is_empty() {
-                        let prompt = r#"你是一个资深网文主编。请深度拆解这前三章正文：核心冲突点、金手指底层逻辑与限制、情绪节奏、章末勾子。精简回答。"#.to_string();
-                        println!("  -> Requesting AI analysis...");
-                        match crate::ai::call_ai(ai_config.clone(), prompt, combined_content, false).await {
-                            Ok(ai_report) => {
-                                novel.ai_analysis = Some(serde_json::to_value(&ai_report).unwrap());
-                                report_segment.push_str(&format!("### [{}]《{}》 (排名: {}, 变动: {})\n", 
-                                    if novel.is_new { "新上榜" } else { "稳坐" },
-                                    novel.title, novel.rank, novel.rank_change));
-                                report_segment.push_str(&format!("> **微观拆解**: {}\n\n", ai_report));
-                                
-                                // [DB] 更新 AI 评价（后续将升级为多智能体评价写入）
-                                if let (Some(ref conn), Some(nid)) = (&db_conn_opt, novel_id_opt) {
-                                    // 为了复用，可以在这里直接用 SQLite UPDATE 补全 ai_reviews_json
-                                    let _ = conn.execute("UPDATE novels SET ai_reviews_json = ?1 WHERE id = ?2", 
-                                        rusqlite::params![serde_json::to_string(&ai_report).unwrap_or_default(), nid]);
-                                }
-                            },
-                            Err(e) => eprintln!("  -> AI failed: {}", e),
-                        }
-                    } else {
-                        eprintln!("  -> Failed to obtain chapters for AI analysis.");
-                    }
-                }
-            },
-            Err(e) => {
-                eprintln!("Pipeline: Error fetching metadata for {}: {}", novel.url, e);
+    // ------ 快照 + 速度分析 ------
+    {
+        let history = HistoryManager::new(workspace_root);
+        let last = history.load_snapshot(&history.get_yesterday_date());
+        let mut current: Vec<NovelRankInfo> = books.iter().map(|(_, bid, title, url)| {
+            NovelRankInfo {
+                book_id: bid.clone(),
+                title: title.clone(),
+                url: url.clone(),
+                rank: 0,
+                last_rank: None,
+                rank_change: 0,
+                is_new: false,
+                metadata: None,
+                ai_analysis: None,
             }
+        }).collect();
+        if let Some(ref conn) = db_conn {
+            let _ = conn.execute("UPDATE novels SET updated_at = CURRENT_TIMESTAMP WHERE id IN (
+                SELECT novel_id FROM rank_history WHERE report_id = (SELECT id FROM scan_reports ORDER BY id DESC LIMIT 1)
+            )", []);
         }
-        
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        calculate_velocity(&mut current, last);
+        let _ = history.save_snapshot(&current);
     }
 
-    // 保存今日快照
-    let _ = history.save_snapshot(&current_novels);
+    let elapsed = Local::now().signed_duration_since(started);
+    eprintln!("========== Pipeline 完成: {:.1}s ==========",
+        elapsed.num_seconds() as f64 + elapsed.num_milliseconds() as f64 / 1000.0);
 
-    // ===== 宏观趋势总结 =====
-    if !report_segment.is_empty() {
-        println!("Pipeline: Generating macro trend summary...");
-        let trend_prompt = r#"你是一个顶级网文市场分析师。以下是当前排行榜前30本小说的逐本深度拆解报告。
-
-请基于以上所有分析，输出一份【榜单宏观趋势洞察】，必须包含以下板块：
-
-## 📈 题材热度排行
-按出现频次和排名权重，列出当前最热门的3-5个题材方向，并简要说明每个题材的核心卖点。
-
-## 🔧 金手指流行趋势
-总结当前榜单上最常见的3-5种金手指类型（如系统流、重生流、穿越流、签到流等），分析它们为什么能吸引读者。
-
-## 🎭 开篇套路分析
-总结排行榜头部作品最常用的开篇手法（如何在前三章抓住读者），提炼出可复用的模式。
-
-## 💡 开书方向建议
-基于以上分析，为准备开新书的作者提供3个具体的、可执行的开书方向建议，每个方向需包含：
-- 推荐题材+金手指组合
-- 差异化切入点（如何避免与现有爆款撞车）
-- 预期目标读者群
-
-## ⚠️ 避坑提醒
-列出当前市场中应该避免的3个常见错误或已经饱和的方向。
-
-请用 Markdown 格式输出，语言精炼、观点鲜明。"#.to_string();
-
-        match crate::ai::call_ai(ai_config.clone(), trend_prompt, report_segment.clone(), false).await {
-            Ok(trend_report) => {
-                report_segment.push_str("\n\n---\n\n# 🔮 榜单宏观趋势洞察\n\n");
-                report_segment.push_str(&trend_report);
-                println!("Pipeline: Macro trend summary generated successfully.");
-            },
-            Err(e) => {
-                eprintln!("Pipeline: Failed to generate trend summary: {}", e);
-                report_segment.push_str("\n\n---\n\n> ⚠️ 宏观趋势分析生成失败，请检查 AI 配置。\n");
-            }
-        }
-    }
-
-    Ok(report_segment)
+    let report = generate_report(rank_url).await?;
+    Ok(report)
 }

@@ -2,6 +2,7 @@
 name = "fanqie-app"
 version = "0.1.0"
 description = "A Tauri App"
+default-run = "fanqie-app"
 authors = ["you"]
 edition = "2021"
 

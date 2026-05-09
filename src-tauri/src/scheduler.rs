@@ -25,14 +25,10 @@ pub fn init(app_handle: AppHandle) {
                     if enabled && current_time == target_time {
                         println!("Scheduler: Time to scan! [{}]", current_time);
                         
-                        let ai_config = crate::ai::AiConfig {
-                            api_base: config["ai"]["api_base"].as_str().unwrap_or_default().to_string(),
-                            api_key: config["ai"]["api_key"].as_str().unwrap_or_default().to_string(),
-                            model: config["ai"]["model"].as_str().unwrap_or_default().to_string(),
-                        };
                         let workspace_root_buf = project_root.clone();
                         let workspace_root = workspace_root_buf.as_path();
-                        let mut aggregated_report = format!("# 今日多维度网文题材深度报告 ({})\n\n", Local::now().format("%Y-%m-%d"));
+                        let mut aggregated_report = String::new();
+                        let mut any_success = false;
 
                         if let Some(rank_urls) = config["rank_urls"].as_array() {
                             for rank_url_val in rank_urls {
@@ -42,12 +38,12 @@ pub fn init(app_handle: AppHandle) {
                                         &app_handle,
                                         rank_url,
                                         "qidian",
-                                        ai_config.clone(),
                                         workspace_root,
                                     ).await;
 
                                     match res {
                                         Ok(partial_report) => {
+                                            any_success = true;
                                             aggregated_report.push_str(&partial_report);
                                             aggregated_report.push_str("\n\n---\n\n");
                                         },
@@ -57,12 +53,18 @@ pub fn init(app_handle: AppHandle) {
                             }
                         }
 
-                        // 保存最终聚合报告
-                        let reports_dir = workspace_root.join("reports");
-                        let _ = std::fs::create_dir_all(&reports_dir);
-                        let report_path = reports_dir.join(format!("report_{}.md", Local::now().format("%Y-%m-%d")));
-                        let _ = std::fs::write(&report_path, aggregated_report);
-                        println!("Scheduler: Final report generated at {:?}", report_path);
+                        // 只在有成功结果时保存报告
+                        if any_success {
+                            let full_report = format!("# 今日多维度网文题材深度报告 ({})\n\n{}",
+                                Local::now().format("%Y-%m-%d"), aggregated_report);
+                            let reports_dir = workspace_root.join("reports");
+                            let _ = std::fs::create_dir_all(&reports_dir);
+                            let report_path = reports_dir.join(format!("report_{}.md", Local::now().format("%Y-%m-%d")));
+                            let _ = std::fs::write(&report_path, full_report);
+                            println!("Scheduler: Final report generated at {:?}", report_path);
+                        } else {
+                            println!("Scheduler: All ranks failed, no report saved.");
+                        }
                     }
                 }
             }

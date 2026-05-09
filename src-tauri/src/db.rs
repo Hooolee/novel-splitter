@@ -1,5 +1,5 @@
 use rusqlite::{params, Connection, Result};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub fn init_db<P: AsRef<Path>>(db_path: P) -> Result<Connection> {
     let conn = Connection::open(db_path)?;
@@ -69,9 +69,10 @@ pub fn init_db<P: AsRef<Path>>(db_path: P) -> Result<Connection> {
 }
 
 // 获取项目根目录下的数据库连接
+// 与 lib.rs::get_project_root() 保持一致，避免 Tauri dev 模式下路径不一致
 pub fn get_conn() -> Result<Connection> {
-    // 假设 db 文件在工作目录 (与原逻辑一致)
-    let path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("novel_intelligence.db");
+    let root = crate::get_project_root();
+    let path = root.join("novel_intelligence.db");
     Connection::open(path)
 }
 
@@ -129,6 +130,50 @@ pub fn insert_rank_history(
         params![report_id, novel_id, rank, rank_change],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_init_db_creates_tables() {
+        let tmp = std::env::temp_dir().join("test_novel_intelligence.db");
+        // 清理旧文件
+        let _ = std::fs::remove_file(&tmp);
+
+        let conn = init_db(&tmp).expect("init_db should succeed");
+        assert!(conn.is_autocommit());
+
+        // 检查四张表都存在
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(tables.contains(&"chapters".to_string()));
+        assert!(tables.contains(&"novels".to_string()));
+        assert!(tables.contains(&"rank_history".to_string()));
+        assert!(tables.contains(&"scan_reports".to_string()));
+
+        // 测试基本 CRUD
+        let nid = upsert_novel(&conn, "test_book_001", "qidian", "测试小说", "测试作者", "玄幻,系统", 0)
+            .expect("upsert_novel should succeed");
+        assert!(nid > 0);
+
+        let rid = create_scan_report(&conn, "test_rank_url").expect("create_scan_report should succeed");
+        assert!(rid > 0);
+
+        insert_rank_history(&conn, rid, nid, 1, "+1").expect("insert_rank_history should succeed");
+
+        upsert_chapter(&conn, nid, 1, "第一章", "内容略", None).expect("upsert_chapter should succeed");
+
+        // 清理
+        let _ = std::fs::remove_file(&tmp);
+        println!("✅ DB 单元测试全部通过");
+    }
 }
 
 /// 插入单章及其细纲

@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use reqwest::Client;
 use tauri::Emitter;
 use futures::StreamExt;
+use std::sync::Mutex;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AiConfig {
@@ -9,6 +10,12 @@ pub struct AiConfig {
     pub api_key: String,
     pub model: String,
 }
+
+/// Tauri 全局状态：AI 配置（由前端 UI 设置）
+pub struct GlobalAiConfig(pub Mutex<Option<AiConfig>>);
+
+/// Tauri 全局状态：工作目录（由前端 UI 设置，默认项目根）
+pub struct GlobalWorkspaceRoot(pub Mutex<String>);
 
 #[derive(Serialize, Clone)]
 struct AiStreamPayload {
