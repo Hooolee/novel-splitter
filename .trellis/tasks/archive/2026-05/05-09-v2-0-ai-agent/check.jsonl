@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/backend/quality.md", "reason": "code review 质量基线"}
+{"file": ".trellis/spec/backend/type-safety.md", "reason": "校验 ai_reviews_json schema 严格、错误处理类型安全"}
+{"file": ".trellis/spec/backend/ai-integration.md", "reason": "校验 prompt 落地、AI 调用规范"}
+{"file": ".trellis/spec/backend/logging.md", "reason": "校验阶段日志、错误日志风格"}
+{"file": ".trellis/spec/backend/tauri-commands.md", "reason": "校验 evaluate_novel 命令实现是否合规"}
+{"file": ".trellis/spec/backend/performance.md", "reason": "校验 Semaphore/tokio::join! 并发使用是否得当"}
+{"file": ".trellis/spec/guides/testing-responsibility.md", "reason": "校验 pipeline_e2e 是否覆盖 Phase 4"}
+{"file": ".trellis/spec/guides/pre-implementation-checklist.md", "reason": "对照 checklist 复核完成度"}
