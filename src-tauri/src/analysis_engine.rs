@@ -365,6 +365,132 @@ async fn run_ai_workers(
 }
 
 // ========================================================================
+//  Phase 4: Multi-Agent Review — 并发三视角评估 (Semaphore=3, 按书粒度)
+// ========================================================================
+async fn run_multi_agent_phase(
+    books: &[(i64, String, String, String)],
+    ai_config: crate::ai::AiConfig,
+    semaphore: Arc<Semaphore>,
+) -> Result<(usize, usize), String> {
+    if books.is_empty() {
+        eprintln!("[Multi-Agent] 没有待评估的小说");
+        return Ok((0, 0));
+    }
+
+    eprintln!(
+        "[Multi-Agent] {} 本书待评估, Semaphore({}) 并发",
+        books.len(),
+        MAX_CONCURRENCY
+    );
+
+    let mut handles = Vec::new();
+
+    for (novel_id, _book_id, title, _url) in books {
+        let permit = semaphore.clone().acquire_owned().await.map_err(|e| e.to_string())?;
+        let novel_id = *novel_id;
+        let title = title.clone();
+        let cfg = ai_config.clone();
+
+        handles.push(tokio::spawn(async move {
+            let _permit = permit;
+
+            // 取 outline_blob + tags
+            let conn = match crate::db::get_conn() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("[Multi-Agent] ⚠️ 《{}》 DB 连接失败: {}", title, e);
+                    return false;
+                }
+            };
+
+            let (db_title, tags, outline_blob, chapter_count) =
+                match crate::db::load_novel_for_review(&conn, novel_id) {
+                    Ok(x) => x,
+                    Err(e) => {
+                        eprintln!("[Multi-Agent] ⚠️ 《{}》 读取细纲失败: {}", title, e);
+                        return false;
+                    }
+                };
+
+            if chapter_count == 0 || outline_blob.trim().is_empty() {
+                eprintln!(
+                    "[Multi-Agent] ⚠️ 《{}》 没有可用 outline_json，跳过",
+                    title
+                );
+                return false;
+            }
+
+            // 按字符边界截断到 ~6000 chars，避免 token 爆
+            let truncated = truncate_chars(&outline_blob, 6000);
+
+            match crate::ai::multi_agent_review(cfg, &db_title, &tags, &truncated, chapter_count)
+                .await
+            {
+                Ok(reviews_json) => {
+                    if let Err(e) = crate::db::update_ai_reviews(&conn, novel_id, &reviews_json) {
+                        eprintln!(
+                            "[Multi-Agent] ⚠️ 《{}》 写入 ai_reviews_json 失败: {}",
+                            title, e
+                        );
+                        return false;
+                    }
+
+                    let summary = extract_vote_summary(&reviews_json);
+                    eprintln!("[Multi-Agent] ✅ 《{}》 {}", title, summary);
+                    true
+                }
+                Err(e) => {
+                    eprintln!("[Multi-Agent] ⚠️ 《{}》 三 Agent 全失败: {}", title, e);
+                    false
+                }
+            }
+        }));
+    }
+
+    let mut ok = 0usize;
+    let mut fail = 0usize;
+    for h in handles {
+        match h.await.unwrap_or(false) {
+            true => ok += 1,
+            false => fail += 1,
+        }
+    }
+
+    eprintln!("[Multi-Agent] 全部完成: 写入 {}/{} 本", ok, ok + fail);
+    Ok((ok, fail))
+}
+
+/// 按字符（非字节）边界截断，避免切坏中文字符。
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    s.chars().take(max_chars).collect()
+}
+
+/// 从 reviews_json 中抽出三个 vote + consensus，给日志用。
+fn extract_vote_summary(reviews_json: &str) -> String {
+    let v = match serde_json::from_str::<serde_json::Value>(reviews_json) {
+        Ok(x) => x,
+        Err(_) => return "<unparseable>".to_string(),
+    };
+    let r = v
+        .pointer("/agents/reader/vote")
+        .and_then(|x| x.as_str())
+        .unwrap_or("--");
+    let e = v
+        .pointer("/agents/editor/vote")
+        .and_then(|x| x.as_str())
+        .unwrap_or("--");
+    let a = v
+        .pointer("/agents/author/vote")
+        .and_then(|x| x.as_str())
+        .unwrap_or("--");
+    let c = v.get("consensus").and_then(|x| x.as_str()).unwrap_or("--");
+    format!("reader={} editor={} author={} consensus={}", r, e, a, c)
+}
+
+// ========================================================================
 //  报告生成 — 从 DB 读取数据生成 Markdown
 // ========================================================================
 async fn generate_report(rank_url: &str) -> Result<String, String> {
@@ -438,14 +564,14 @@ pub async fn run_full_analysis_pipeline(
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENCY));
 
     // ------ Phase 1: Producer ------
-    eprintln!("[Pipeline 1/3] Producer...");
+    eprintln!("[Pipeline 1/4] Producer...");
     let books = producer_scan_rank(app, rank_url, platform).await?;
     if books.is_empty() {
         return Err("Producer 未扫到有效书籍".to_string());
     }
 
     // ------ Phase 2: Fetch Workers (Semaphore=3) ------
-    eprintln!("[Pipeline 2/3] Fetch Workers...");
+    eprintln!("[Pipeline 2/4] Fetch Workers...");
     let fetch_list: Vec<(i64, String, String)> = books.iter()
         .map(|(id, _, title, url)| (*id, title.clone(), url.clone()))
         .collect();
@@ -454,8 +580,14 @@ pub async fn run_full_analysis_pipeline(
     ).await?;
 
     // ------ Phase 3: AI Workers (Semaphore=3) ------
-    eprintln!("[Pipeline 3/3] AI Workers...");
-    let _ai_ok = run_ai_workers(ai_config, semaphore.clone()).await?;
+    eprintln!("[Pipeline 3/4] AI Workers...");
+    let _ai_ok = run_ai_workers(ai_config.clone(), semaphore.clone()).await?;
+
+    // ------ Phase 4: Multi-Agent Review (Semaphore=3) ------
+    eprintln!("[Pipeline 4/4] Multi-Agent Review...");
+    if let Err(e) = run_multi_agent_phase(&books, ai_config, semaphore.clone()).await {
+        eprintln!("[Pipeline 4/4] Multi-Agent 阶段错误（不阻塞流水线）: {}", e);
+    }
 
     // ------ 快照 + 速度分析 ------
     {

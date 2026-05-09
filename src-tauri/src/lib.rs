@@ -285,6 +285,55 @@ async fn update_ai_config(app: tauri::AppHandle, api_base: String, api_key: Stri
     Ok(())
 }
 
+/// 手动触发单本小说的多 Agent 评估（任务二 Phase 4 的独立入口）。
+///
+/// 步骤：
+/// 1. 从全局 AI 配置读取 API 凭证
+/// 2. 从 DB 取该 novel 的 title/tags + 所有 chapters.outline_json 拼成 outline_blob
+/// 3. 调用 ai::multi_agent_review 触发三 Agent 并行
+/// 4. 把结果 UPDATE 到 novels.ai_reviews_json
+/// 5. 返回新生成的 JSON 字符串给前端
+///
+/// 失败语义：AI 配置缺失 / 没有 outline_json / 三 Agent 全挂 → Err
+#[tauri::command]
+async fn evaluate_novel(app: tauri::AppHandle, novel_id: i64) -> Result<String, String> {
+    let ai_config = {
+        let state = app.state::<crate::ai::GlobalAiConfig>();
+        let guard = state.0.lock().map_err(|e| format!("获取 AI 配置失败: {}", e))?;
+        guard.clone().ok_or("AI 配置未设置，请在设置中配置 API Key")?
+    };
+
+    let conn = crate::db::get_conn().map_err(|e| format!("DB 连接失败: {}", e))?;
+    let (title, tags, outline_blob, chapter_count) =
+        crate::db::load_novel_for_review(&conn, novel_id)
+            .map_err(|e| format!("未找到 novel_id={} 或读取失败: {}", novel_id, e))?;
+
+    if chapter_count == 0 || outline_blob.trim().is_empty() {
+        return Err("该书没有 outline_json，请先跑流水线 Phase 3".to_string());
+    }
+
+    // 按字符截断到 6000 chars
+    let truncated: String = if outline_blob.chars().count() > 6000 {
+        outline_blob.chars().take(6000).collect()
+    } else {
+        outline_blob
+    };
+
+    let reviews_json = crate::ai::multi_agent_review(
+        ai_config,
+        &title,
+        &tags,
+        &truncated,
+        chapter_count,
+    )
+    .await?;
+
+    crate::db::update_ai_reviews(&conn, novel_id, &reviews_json)
+        .map_err(|e| format!("写入 ai_reviews_json 失败: {}", e))?;
+
+    Ok(reviews_json)
+}
+
 #[cfg(not(test))]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -375,7 +424,8 @@ pub fn run() {
             read_report,
             trigger_full_scan,
             update_ai_config,
-            set_workspace_root
+            set_workspace_root,
+            evaluate_novel
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

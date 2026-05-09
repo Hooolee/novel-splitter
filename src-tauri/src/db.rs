@@ -188,11 +188,67 @@ pub fn upsert_chapter(
     conn.execute(
         "INSERT INTO chapters (novel_id, chapter_index, title, content, outline_json)
          VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(novel_id, chapter_index) DO UPDATE SET 
-            title=excluded.title, 
-            content=excluded.content, 
+         ON CONFLICT(novel_id, chapter_index) DO UPDATE SET
+            title=excluded.title,
+            content=excluded.content,
             outline_json=COALESCE(excluded.outline_json, chapters.outline_json)",
         params![novel_id, chapter_index, title, content, outline_json],
+    )?;
+    Ok(())
+}
+
+/// 加载多 Agent 评估所需的小说上下文：title / tags / 拼接好的 outline_blob / 实际有 outline 的章节数。
+/// outline_blob 形如：
+/// ```text
+/// ## 第1章 章节标题
+/// [...outline_json 原文...]
+///
+/// ## 第2章 ...
+/// ```
+pub fn load_novel_for_review(
+    conn: &Connection,
+    novel_id: i64,
+) -> Result<(String, String, String, usize)> {
+    let (title, tags): (String, String) = conn.query_row(
+        "SELECT title, COALESCE(tags, '') FROM novels WHERE id = ?1",
+        params![novel_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+
+    let mut stmt = conn.prepare(
+        "SELECT chapter_index, title, outline_json FROM chapters
+         WHERE novel_id = ?1 AND outline_json IS NOT NULL AND outline_json != ''
+         ORDER BY chapter_index ASC",
+    )?;
+    let rows = stmt.query_map(params![novel_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+
+    let mut blob = String::new();
+    let mut chapter_count = 0usize;
+    for r in rows {
+        if let Ok((idx, ch_title, outline)) = r {
+            blob.push_str(&format!("\n## 第{}章 {}\n{}\n", idx, ch_title, outline));
+            chapter_count += 1;
+        }
+    }
+
+    Ok((title, tags, blob, chapter_count))
+}
+
+/// 写入 multi-agent 评估结果到 novels.ai_reviews_json 并刷新 updated_at
+pub fn update_ai_reviews(
+    conn: &Connection,
+    novel_id: i64,
+    reviews_json: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE novels SET ai_reviews_json = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+        params![reviews_json, novel_id],
     )?;
     Ok(())
 }

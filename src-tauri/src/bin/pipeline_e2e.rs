@@ -74,17 +74,111 @@ fn main() {
         }
     }
 
-    // 4. 完整管线指引
-    eprintln!("\n--- 测试 3: 完整管线 (需要 App 运行) ---");
+    // 4. 测试 Multi-Agent Review (Phase 4)
+    eprintln!("\n--- 测试 3: Multi-Agent Review (任务二) ---");
+    {
+        // 先给测试章节注入一个 outline_json，让 multi_agent_review 有可用上下文
+        let conn = fanqie_app_lib::db::get_conn().unwrap();
+        conn.execute(
+            "UPDATE chapters SET outline_json = ?1 WHERE chapter_index = 1",
+            [r#"[{"event":"主角街头偶遇神秘老人","purpose":"展示金手指","emotion":"悬疑","highlight":"古玉来历不明"}]"#],
+        ).expect("注入 outline_json 失败");
+
+        let nid: i64 = conn.query_row(
+            "SELECT id FROM novels WHERE book_id = 'test_book_001'",
+            [],
+            |row| row.get(0),
+        ).expect("查询测试 novel 失败");
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(async {
+            let config = {
+                let state = handle.state::<fanqie_app_lib::ai::GlobalAiConfig>();
+                let guard = state.0.lock().unwrap();
+                guard.clone().unwrap()
+            };
+
+            let conn2 = fanqie_app_lib::db::get_conn().unwrap();
+            let (title, tags, blob, chapters) =
+                fanqie_app_lib::db::load_novel_for_review(&conn2, nid)
+                    .expect("load_novel_for_review 失败");
+            assert!(chapters >= 1, "测试 novel 至少需要 1 章 outline_json");
+
+            fanqie_app_lib::ai::multi_agent_review(config, &title, &tags, &blob, chapters).await
+        });
+
+        match result {
+            Ok(json) => {
+                let preview: String = json.chars().take(200).collect();
+                eprintln!("  ✅ Multi-Agent 返回 (preview): {}", preview);
+
+                // Schema 校验
+                let v: serde_json::Value =
+                    serde_json::from_str(&json).expect("multi_agent_review JSON 解析失败");
+
+                assert!(v.get("agents").is_some(), "缺 agents 字段");
+                for k in &["reader", "editor", "author"] {
+                    assert!(
+                        v.pointer(&format!("/agents/{}", k)).is_some(),
+                        "缺 agents.{} 字段",
+                        k
+                    );
+                }
+                let consensus = v
+                    .get("consensus")
+                    .and_then(|x| x.as_str())
+                    .expect("缺 consensus 字段");
+                assert!(
+                    matches!(
+                        consensus,
+                        "all_yes" | "all_no" | "majority_yes" | "majority_no" | "divergent"
+                    ),
+                    "consensus 枚举非法: {}",
+                    consensus
+                );
+                let model = v
+                    .pointer("/meta/model")
+                    .and_then(|x| x.as_str())
+                    .expect("缺 meta.model 字段");
+                assert!(!model.is_empty(), "meta.model 不能为空");
+                let chs = v
+                    .pointer("/meta/input_chapters")
+                    .and_then(|x| x.as_u64())
+                    .expect("缺 meta.input_chapters");
+                assert!(chs >= 1, "input_chapters 至少为 1");
+                eprintln!(
+                    "  ✅ Schema 校验通过 consensus={} model={} chapters={}",
+                    consensus, model, chs
+                );
+
+                // 顺便验证 update_ai_reviews 写入 + 回读
+                fanqie_app_lib::db::update_ai_reviews(&conn, nid, &json)
+                    .expect("update_ai_reviews 失败");
+                let written: String = conn
+                    .query_row(
+                        "SELECT ai_reviews_json FROM novels WHERE id = ?1",
+                        [nid],
+                        |row| row.get(0),
+                    )
+                    .expect("回读 ai_reviews_json 失败");
+                assert_eq!(written, json, "DB 回读 ai_reviews_json 与原 JSON 不一致");
+                eprintln!("  ✅ ai_reviews_json 写入并回读校验通过");
+            }
+            Err(e) => eprintln!("  ⚠️  Multi-Agent 调用失败 (可能 API 未就绪): {}", e),
+        }
+    }
+
+    // 5. 完整管线指引
+    eprintln!("\n--- 测试 4: 完整管线 (需要 App 运行) ---");
     eprintln!("  蜘蛛在 headless 下不可用，完整 E2E 请运行:");
     eprintln!("  ┌─────────────────────────────────────────────────────────┐");
     eprintln!("  │  npm run tauri dev                                      │");
     eprintln!("  │  → 打开 App 后在左下角⚙️确认 AI 配置             │");
     eprintln!("  │  → 切到「报告」Tab → 选榜单 → 点「立即扫榜」  │");
-    eprintln!("  │  → 观察终端输出 [Pipeline 1/3] [2/3] [3/3]     │");
+    eprintln!("  │  → 观察终端输出 [Pipeline 1/4] [2/4] [3/4] [4/4]      │");
     eprintln!("  └─────────────────────────────────────────────────────────┘");
 
-    // 5. 清理
+    // 6. 清理
     if std::env::var("SKIP_CLEANUP").is_err() {
         let _ = std::fs::remove_file(&db_path);
         eprintln!("\n✅ 测试数据已清理");
