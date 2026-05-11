@@ -1,0 +1,12 @@
+{"file": ".trellis/spec/frontend/quality.md", "reason": "前端质量基线与提交前检查清单"}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "校验 NovelCardData / NovelFilter / AiReviews 类型化，无 any"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "校验 filter ref 命名/作用域、不持久化决策落实"}
+{"file": ".trellis/spec/frontend/components.md", "reason": "校验 NovelCard 组件 Props/Emits/SFC 合规"}
+{"file": ".trellis/spec/frontend/tauri-integration.md", "reason": "校验 list_novels invoke 调用 + pipeline-progress 重刷新时机"}
+{"file": ".trellis/spec/frontend/css-layout.md", "reason": "校验卡片网格响应式、徽章样式与现有皮肤变量一致"}
+{"file": ".trellis/spec/backend/quality.md", "reason": "后端 query 质量基线"}
+{"file": ".trellis/spec/backend/tauri-commands.md", "reason": "校验 list_novels 命令实现是否合规"}
+{"file": ".trellis/spec/backend/type-safety.md", "reason": "校验 NovelRow Serialize、Result 错误类型"}
+{"file": ".trellis/spec/guides/testing-responsibility.md", "reason": "校验单元测试覆盖 + UI 自测"}
+{"file": ".trellis/spec/guides/pre-implementation-checklist.md", "reason": "对照 checklist 复核完成度"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "复核前后端类型对齐、失败兜底"}

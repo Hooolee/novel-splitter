@@ -252,3 +252,241 @@ pub fn update_ai_reviews(
     )?;
     Ok(())
 }
+
+// =========================================================================
+//  Library Tab 卡片查询（任务四a）
+// =========================================================================
+
+/// 排序枚举（与前端 SortBy union type 对齐，serde rename snake_case）
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum NovelSortBy {
+    UpdatedDesc,
+    LatestRankAsc,
+    ScanCountDesc,
+}
+
+impl Default for NovelSortBy {
+    fn default() -> Self { NovelSortBy::UpdatedDesc }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
+pub struct NovelListFilter {
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub consensus: Vec<String>,
+    pub platform: Option<String>,
+    #[serde(default)]
+    pub sort_by: NovelSortBy,
+}
+
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct NovelListRow {
+    pub id: i64,
+    pub book_id: String,
+    pub platform: String,
+    pub title: String,
+    pub author: Option<String>,
+    pub tags: Vec<String>,
+    pub word_count: Option<i64>,
+    pub created_at: String,
+    pub updated_at: String,
+
+    /// 解析后的 ai_reviews_json（含 agents / consensus / meta），失败或为空则 null。
+    pub ai_reviews: Option<serde_json::Value>,
+    /// 最近一次上榜排名（最新 scan_report 的 rank_history 行），未上榜则 null。
+    pub latest_rank: Option<i64>,
+    /// 累计上榜次数 = rank_history 中按该 novel 的行数。
+    pub scan_count: i64,
+}
+
+/// 查询书库卡片列表。
+///
+/// 过滤语义：
+///   - `tags`：OR（任一 tag 命中即收）
+///   - `consensus`：OR（基于 ai_reviews_json 字符串 LIKE 匹配）
+///   - `platform`：精确等于
+///
+/// SQL 注入防护：tag / consensus / platform 使用参数化绑定，不直接拼字符串。
+pub fn list_novels(conn: &Connection, filter: &NovelListFilter) -> Result<Vec<NovelListRow>> {
+    let mut where_clauses: Vec<String> = Vec::new();
+    let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(p) = &filter.platform {
+        where_clauses.push("n.platform = ?".to_string());
+        params_vec.push(Box::new(p.clone()));
+    }
+
+    if !filter.tags.is_empty() {
+        let ors: Vec<String> = filter.tags.iter().map(|_| "n.tags LIKE ?".to_string()).collect();
+        where_clauses.push(format!("({})", ors.join(" OR ")));
+        for t in &filter.tags {
+            params_vec.push(Box::new(format!("%{}%", t)));
+        }
+    }
+
+    if !filter.consensus.is_empty() {
+        let ors: Vec<String> = filter
+            .consensus
+            .iter()
+            .map(|_| "n.ai_reviews_json LIKE ?".to_string())
+            .collect();
+        where_clauses.push(format!("({})", ors.join(" OR ")));
+        for c in &filter.consensus {
+            params_vec.push(Box::new(format!("%\"consensus\":\"{}\"%", c)));
+        }
+    }
+
+    let where_sql = if where_clauses.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", where_clauses.join(" AND "))
+    };
+
+    let order_sql = match filter.sort_by {
+        NovelSortBy::UpdatedDesc => "ORDER BY n.updated_at DESC",
+        NovelSortBy::LatestRankAsc => "ORDER BY latest_rank ASC NULLS LAST, n.updated_at DESC",
+        NovelSortBy::ScanCountDesc => "ORDER BY scan_count DESC, n.updated_at DESC",
+    };
+
+    let sql = format!(
+        "SELECT n.id, n.book_id, n.platform, n.title, n.author, n.tags, n.word_count,
+                n.ai_reviews_json, n.created_at, n.updated_at,
+                (SELECT rh.rank FROM rank_history rh
+                 JOIN scan_reports sr ON sr.id = rh.report_id
+                 WHERE rh.novel_id = n.id
+                 ORDER BY sr.scan_date DESC LIMIT 1) AS latest_rank,
+                (SELECT COUNT(*) FROM rank_history rh WHERE rh.novel_id = n.id) AS scan_count
+         FROM novels n
+         {} {}",
+        where_sql, order_sql,
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let params_ref: Vec<&dyn rusqlite::ToSql> =
+        params_vec.iter().map(|b| b.as_ref()).collect();
+
+    let rows = stmt.query_map(params_ref.as_slice(), |row| {
+        let tags_csv: Option<String> = row.get(5)?;
+        let tags: Vec<String> = tags_csv
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let reviews_raw: Option<String> = row.get(7)?;
+        let ai_reviews = reviews_raw
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+
+        Ok(NovelListRow {
+            id: row.get(0)?,
+            book_id: row.get(1)?,
+            platform: row.get(2)?,
+            title: row.get(3)?,
+            author: row.get(4)?,
+            tags,
+            word_count: row.get(6)?,
+            created_at: row.get(8)?,
+            updated_at: row.get(9)?,
+            ai_reviews,
+            latest_rank: row.get(10)?,
+            scan_count: row.get(11)?,
+        })
+    })?;
+
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod list_novels_tests {
+    use super::*;
+
+    /// 构造一个独立临时 DB 并填充 3 本测试 novel：
+    ///   - 玄幻 + all_yes
+    ///   - 都市 + divergent
+    ///   - 玄幻+系统（无 ai_reviews）
+    fn seed() -> (std::path::PathBuf, Connection) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let tmp = std::env::temp_dir().join(format!(
+            "test_list_novels_{}_{}.db",
+            std::process::id(),
+            id,
+        ));
+        let _ = std::fs::remove_file(&tmp);
+        let conn = init_db(&tmp).expect("init_db");
+
+        let n1 = upsert_novel(&conn, "b001", "qidian", "玄幻一", "X", "玄幻", 0).unwrap();
+        let n2 = upsert_novel(&conn, "b002", "qidian", "都市二", "Y", "都市", 0).unwrap();
+        let _n3 = upsert_novel(&conn, "b003", "qidian", "系统三", "Z", "玄幻,系统", 0).unwrap();
+
+        // ai_reviews_json
+        update_ai_reviews(
+            &conn, n1,
+            r#"{"agents":{"reader":{"vote":"yes","focus":[]},"editor":{"vote":"yes","focus":[]},"author":{"vote":"yes","focus":[]}},"consensus":"all_yes","meta":{"model":"m","generated_at":"t","input_chapters":3}}"#
+        ).unwrap();
+        update_ai_reviews(
+            &conn, n2,
+            r#"{"agents":{"reader":{"vote":"yes","focus":[]},"editor":{"vote":"no","focus":[]},"author":{"vote":"maybe","focus":[]}},"consensus":"divergent","meta":{"model":"m","generated_at":"t","input_chapters":3}}"#
+        ).unwrap();
+
+        (tmp, conn)
+    }
+
+    #[test]
+    fn returns_all_novels_when_no_filter() {
+        let (tmp, conn) = seed();
+        let rows = list_novels(&conn, &NovelListFilter::default()).expect("list_novels");
+        assert_eq!(rows.len(), 3);
+        // ai_reviews parse 后是 Object（前两本）或 None（第三本）
+        let with_reviews = rows.iter().filter(|r| r.ai_reviews.is_some()).count();
+        assert_eq!(with_reviews, 2);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn filters_by_tag_or_semantic() {
+        let (tmp, conn) = seed();
+        let filter = NovelListFilter {
+            tags: vec!["玄幻".to_string()],
+            ..Default::default()
+        };
+        let rows = list_novels(&conn, &filter).expect("list_novels");
+        // 玄幻一 + 系统三（tags 含"玄幻"），不含都市二
+        assert_eq!(rows.len(), 2);
+        let titles: Vec<String> = rows.iter().map(|r| r.title.clone()).collect();
+        assert!(titles.contains(&"玄幻一".to_string()));
+        assert!(titles.contains(&"系统三".to_string()));
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn filters_by_consensus() {
+        let (tmp, conn) = seed();
+        let filter = NovelListFilter {
+            consensus: vec!["all_yes".to_string()],
+            ..Default::default()
+        };
+        let rows = list_novels(&conn, &filter).expect("list_novels");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "玄幻一");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn parses_tags_csv_to_vec() {
+        let (tmp, conn) = seed();
+        let rows = list_novels(&conn, &NovelListFilter::default()).unwrap();
+        let three = rows.iter().find(|r| r.title == "系统三").unwrap();
+        assert_eq!(three.tags, vec!["玄幻".to_string(), "系统".to_string()]);
+        let _ = std::fs::remove_file(&tmp);
+    }
+}

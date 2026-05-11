@@ -101,6 +101,23 @@ onUnmounted(() => {
 | `delete_chapter` | `{ chapterPath }` | `void` | 删除章节 |
 | `read_log_file` | — | `string` | 读取日志 |
 | `clear_log` | — | `void` | 清空日志 |
+| `trigger_full_scan` | `{ targetUrl: string \| null, platform: string \| null }` | `void` | V2.0 触发流水线（榜单/单本由 URL 推断 mode） |
+| `evaluate_novel` | `{ novelId: number }` | `string` | V2.0 单本重跑多 Agent 评估，返回 ai_reviews JSON |
+| `list_novels` | `{ filter?: NovelListFilter }` | `NovelListRow[]` | V2.0 任务四a 书库卡片查询，含 parsed ai_reviews + latest_rank + scan_count |
+
+`NovelListFilter` schema：
+
+```typescript
+interface NovelListFilter {
+  tags: string[];                 // OR 语义（任一命中即收）
+  consensus: ConsensusKey[];      // OR
+  platform: string | null;
+  sort_by: 'updated_desc' | 'latest_rank_asc' | 'scan_count_desc';
+}
+```
+
+`NovelListRow` 含 `id/book_id/platform/title/author/tags/word_count/created_at/updated_at` + 派生字段 `ai_reviews/latest_rank/scan_count`（在 `src/components/NovelCard.vue` 内 `export interface`，App.vue 复用）。
+
 
 ## 可用事件列表
 

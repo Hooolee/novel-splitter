@@ -341,6 +341,15 @@ async fn evaluate_novel(app: tauri::AppHandle, novel_id: i64) -> Result<String, 
     Ok(reviews_json)
 }
 
+/// library Tab 卡片列表查询（任务四a）：返回 novels + parsed ai_reviews + latest_rank + scan_count。
+/// filter 字段全部可选，传 null/缺省时返回全部书。
+#[tauri::command]
+fn list_novels(filter: Option<crate::db::NovelListFilter>) -> Result<Vec<crate::db::NovelListRow>, String> {
+    let conn = crate::db::get_conn().map_err(|e| format!("DB 连接失败: {}", e))?;
+    let f = filter.unwrap_or_default();
+    crate::db::list_novels(&conn, &f).map_err(|e| format!("查询书库失败: {}", e))
+}
+
 #[cfg(not(test))]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -432,7 +441,8 @@ pub fn run() {
             trigger_full_scan,
             update_ai_config,
             set_workspace_root,
-            evaluate_novel
+            evaluate_novel,
+            list_novels
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

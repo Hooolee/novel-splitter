@@ -174,6 +174,20 @@ const count = defineModel<number>('count', { required: true })
 - `LogViewer.vue` - 日志查看器
 - `DownloadProgress.vue` - 下载进度条
 
+### 已提取组件
+
+- `src/components/NovelCard.vue` - V2.0 任务四a 引入，library Tab 卡片
+  - **Props**: `novel: NovelListRow`、`selected?: boolean`
+  - **Emits**: `click(novel: NovelListRow)`
+  - **范式要点**：
+    - 接口类型（`NovelListRow` / `AiReviews` / `AiReviewsAgent`）在组件文件内 `export interface` 声明，并由 App.vue `import { type NovelListRow }` 复用 — **后端 NovelListRow 结构体的 TypeScript 镜像**，字段命名 snake_case 对齐 serde
+    - `consensus` 五枚举各自映射徽章配色（all_yes=绿、majority_yes=翠、divergent=琥珀、majority_no=玫瑰、all_no=红）
+    - `vote` 三值用 emoji 表达：yes=👍 / no=👎 / maybe=🤔
+    - tags 显示前 3 个 + 「+N」溢出标记
+    - 卡片内 `flex flex-col gap-2`，外部由 grid 容器决定列数
+  - **选中态**：`selected` Prop 控制 `border-accent ring-1 ring-accent/30`
+
+
 ## 最佳实践
 
 1. **默认 `<script setup>`** - 所有新组件使用
