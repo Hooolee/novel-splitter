@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/quality.md", "reason": "复核死代码是否彻底、无悬挂引用"}
+{"file": ".trellis/spec/backend/tauri-commands.md", "reason": "复核 invoke_handler 无删除命令残留"}
