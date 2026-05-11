@@ -140,6 +140,71 @@ const CONSENSUS_OPTIONS: { value: ConsensusKey; label: string }[] = [
     { value: 'all_no',       label: '一致不看好' },
 ];
 
+// --- Insights panel (任务四b) ---
+const CONSENSUS_WEIGHT: Record<string, number> = {
+    all_yes: 2, majority_yes: 1.5, divergent: 0, majority_no: -1, all_no: -2,
+};
+const showInsights = ref(true);
+
+const tagWeightMap = computed(() => {
+    const map = new Map<string, number>();
+    for (const n of novels.value) {
+        const w = CONSENSUS_WEIGHT[n.ai_reviews?.consensus ?? ''] ?? 0;
+        for (const t of n.tags) {
+            if (!t) continue;
+            map.set(t, (map.get(t) ?? 0) + w);
+        }
+    }
+    return map;
+});
+
+const topTags = computed(() => {
+    return Array.from(tagWeightMap.value.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 15);
+});
+
+const maxTagWeight = computed(() => {
+    return topTags.value.length > 0 ? topTags.value[0][1] : 1;
+});
+
+const focusCountMap = computed(() => {
+    const map = new Map<string, number>();
+    for (const n of novels.value) {
+        const agents = n.ai_reviews?.agents;
+        if (!agents) continue;
+        for (const key of ['reader', 'editor', 'author'] as const) {
+            const agent = agents[key];
+            if (!agent?.focus) continue;
+            for (const f of agent.focus) {
+                if (!f) continue;
+                map.set(f, (map.get(f) ?? 0) + 1);
+            }
+        }
+    }
+    return map;
+});
+
+const topFocus = computed(() => {
+    return Array.from(focusCountMap.value.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10);
+});
+
+const maxFocusCount = computed(() => {
+    return topFocus.value.length > 0 ? topFocus.value[0][1] : 1;
+});
+
+const consensusDistribution = computed(() => {
+    const dist: Record<string, number> = { all_yes: 0, majority_yes: 0, divergent: 0, majority_no: 0, all_no: 0, unrated: 0 };
+    for (const n of novels.value) {
+        const c = n.ai_reviews?.consensus;
+        if (c && c in dist) dist[c]++;
+        else dist.unrated++;
+    }
+    return dist;
+});
+
 async function loadNovels() {
     novelsLoading.value = true;
     try {
@@ -864,7 +929,73 @@ function formatReportName(filename: string): string {
                 </button>
             </div>
         </div>
-        
+
+        <!-- Insights Panel (任务四b) — 仅在 activeTab === 'library' 且 novels.length > 0 时可见 -->
+        <template v-if="activeTab === 'library' && novels.length > 0">
+        <div class="mb-3 px-1 border border-border-dim rounded-lg bg-subtle/30">
+            <button @click="showInsights = !showInsights" class="w-full flex items-center justify-between px-2 py-2 text-[11px] font-bold text-txt-dim uppercase tracking-wider">
+                <span>📊 趋势洞察</span>
+                <span class="text-[10px] transition-transform" :class="showInsights ? 'rotate-180' : ''">▼</span>
+            </button>
+            <div v-show="showInsights" class="px-2 pb-3 space-y-3 text-[11px]">
+                <!-- 热门 tag 排行 -->
+                <div v-if="topTags.length > 0">
+                    <div class="text-txt-dim mb-1">热门题材</div>
+                    <div class="space-y-1">
+                        <div v-for="[tag, w] in topTags" :key="tag" class="flex items-center gap-2">
+                            <span class="w-16 truncate text-txt-dim">{{ tag }}</span>
+                            <div class="flex-1 h-2 rounded-full bg-subtle overflow-hidden">
+                                <div class="h-full rounded-full transition-all duration-300" :style="{ width: (w / maxTagWeight * 100) + '%', background: w >= 0 ? 'var(--accent, #f97316)' : '#ef4444' }"></div>
+                            </div>
+                            <span class="w-6 text-right text-txt-dim font-mono">{{ w > 0 ? '+' : '' }}{{ w }}</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Agent 关注热点 -->
+                <div v-if="topFocus.length > 0">
+                    <div class="text-txt-dim mb-1">高频关注点</div>
+                    <div class="flex flex-wrap gap-1">
+                        <span v-for="[kw, cnt] in topFocus" :key="kw"
+                            class="px-1.5 py-0.5 rounded text-[10px] border border-border-dim"
+                            :style="{ opacity: 0.5 + (cnt / maxFocusCount) * 0.5 }"
+                        >{{ kw }} <span class="opacity-50">{{ cnt }}</span></span>
+                    </div>
+                </div>
+
+                <!-- 共识分布 -->
+                <div>
+                    <div class="text-txt-dim mb-1">共识分布</div>
+                    <div class="flex gap-1 h-2 rounded-full overflow-hidden">
+                        <div v-for="[c, label, color] in [
+                            ['all_yes', '一致看好', '#22c55e'],
+                            ['majority_yes', '多数看好', '#10b981'],
+                            ['divergent', '分歧', '#f59e0b'],
+                            ['majority_no', '多不看好', '#f43f5e'],
+                            ['all_no', '一致不看好', '#ef4444'],
+                        ] as const" :key="c"
+                            :title="`${label}: ${consensusDistribution[c]}`"
+                            class="h-full first:rounded-l-full last:rounded-r-full transition-all"
+                            :style="{ width: (consensusDistribution[c] / novels.length * 100) + '%', backgroundColor: color, opacity: 0.8 }"
+                        ></div>
+                    </div>
+                    <div class="flex flex-wrap gap-x-2 gap-y-0.5 mt-1">
+                        <span v-for="[c, label, color] in [
+                            ['all_yes', '一致看好', '#22c55e'],
+                            ['majority_yes', '多数看好', '#10b981'],
+                            ['divergent', '分歧', '#f59e0b'],
+                            ['majority_no', '多不看好', '#f43f5e'],
+                            ['all_no', '一致不看好', '#ef4444'],
+                        ] as const" :key="c" class="text-[9px] flex items-center gap-1 text-txt-dim">
+                            <span class="w-1.5 h-1.5 rounded-full inline-block" :style="{ backgroundColor: color }"></span>
+                            {{ label }} {{ consensusDistribution[c] }}
+                        </span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        </template>
+
         <!-- Filter Bar -->
         <div class="flex flex-col gap-2 mb-3 px-1">
             <!-- Consensus filter -->

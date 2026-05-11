@@ -1,0 +1,11 @@
+{"file": ".trellis/spec/frontend/index.md", "reason": "前端 spec 入口与导航"}
+{"file": ".trellis/spec/frontend/components.md", "reason": "面板组件规范、SFC 模式；本任务内联在 App.vue 或抽小组件取决于大小"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "新增 computed 聚合逻辑（tagWeightMap / focusCountMap / consensusDist），纯 computed 无后端"}
+{"file": ".trellis/spec/frontend/css-layout.md", "reason": "面板可折叠、tag 热度条、consensus 分布条布局与皮肤变量一致性"}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "computed 返回类型安全，无 any"}
+{"file": ".trellis/spec/frontend/tauri-integration.md", "reason": "本任务不需新 invoke，复用 4a 的 list_novels 数据"}
+{"file": ".trellis/spec/guides/pre-implementation-checklist.md", "reason": "实现前必走 checklist"}
+{"file": ".trellis/spec/guides/testing-responsibility.md", "reason": "纯 UI 改动按自测原则"}
+{"file": ".trellis/tasks/05-11-v2-0-b/prd.md", "reason": "本任务 PRD，需求/AC/计算逻辑/布局技术细节"}
+{"file": ".trellis/tasks/05-11-v2-0-b/research/chart-lib.md", "reason": "图表库调研——本任务已不再需要雷达图，但记录了 pivot 过程"}
+{"file": ".trellis/tasks/archive/2026-05/05-11-v2-0/prd.md", "reason": "4a PRD，提供 novels[] 数据源 schema 和 layout 上下文"}
