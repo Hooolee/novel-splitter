@@ -4,7 +4,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { marked } from "marked";
-import NovelCard, { type NovelListRow } from "./components/NovelCard.vue";
+import { type NovelListRow } from "./components/NovelCard.vue";
+import NovelGrid from "./components/NovelGrid.vue";
 
 type ConsensusKey = NonNullable<NovelListRow['ai_reviews']>['consensus'];
 type SortBy = 'updated_desc' | 'latest_rank_asc' | 'scan_count_desc';
@@ -120,6 +121,8 @@ const currentMetadata = ref<NovelMetadata | null>(null);
 
 // --- Library DB cards (任务四a) ---
 const novels = ref<NovelListRow[]>([]);
+// Template helper: vue-tsc workaround for v-for type narrowing
+// _novels not needed
 const novelsLoading = ref(false);
 const tagFilter = ref<string[]>([]);
 const consensusFilter = ref<ConsensusKey[]>([]);
@@ -144,8 +147,6 @@ const CONSENSUS_OPTIONS: { value: ConsensusKey; label: string }[] = [
 const CONSENSUS_WEIGHT: Record<string, number> = {
     all_yes: 2, majority_yes: 1.5, divergent: 0, majority_no: -1, all_no: -2,
 };
-const showInsights = ref(true);
-
 const tagWeightMap = computed(() => {
     const map = new Map<string, number>();
     for (const n of novels.value) {
@@ -164,9 +165,6 @@ const topTags = computed(() => {
         .slice(0, 15);
 });
 
-const maxTagWeight = computed(() => {
-    return topTags.value.length > 0 ? topTags.value[0][1] : 1;
-});
 
 const focusCountMap = computed(() => {
     const map = new Map<string, number>();
@@ -191,9 +189,8 @@ const topFocus = computed(() => {
         .slice(0, 10);
 });
 
-const maxFocusCount = computed(() => {
-    return topFocus.value.length > 0 ? topFocus.value[0][1] : 1;
-});
+
+const selectedNovelId = computed((): number | null => selectedNovel.value?.id ?? null);
 
 const consensusDistribution = computed(() => {
     const dist: Record<string, number> = { all_yes: 0, majority_yes: 0, divergent: 0, majority_no: 0, all_no: 0, unrated: 0 };
@@ -884,250 +881,6 @@ function formatReportName(filename: string): string {
             <button @click="activeTab = 'reports'; loadReportFiles()" class="flex-1 relative z-10 text-xs font-medium py-1.5 text-center transition-colors duration-200" :class="activeTab === 'reports' ? 'text-txt' : 'text-txt-dim hover:text-txt'">📊 报告</button>
         </div>
 
-        <!-- ==================== 书库 Tab ==================== -->
-        <template v-if="activeTab === 'library'">
-        <!-- Workspace Directory Selector -->
-        <div class="mb-4 px-1">
-            <div class="flex items-center justify-between mb-2">
-                <span class="text-[11px] font-bold text-txt-dim uppercase tracking-wider">工作目录</span>
-            </div>
-            <button
-                @click="selectWorkspaceDir"
-                class="w-full bg-subtle border border-border-dim rounded-lg px-3 py-2.5 text-left hover:bg-hover transition-colors group"
-            >
-                <div class="flex items-center gap-2">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4 text-accent flex-shrink-0">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v12a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9a2.25 2.25 0 0 0-2.25-2.25h-5.379a1.5 1.5 0 0 1-1.06-.44Z" />
-                    </svg>
-                    <span v-if="workspaceRoot" class="text-xs text-txt truncate flex-1" :title="workspaceRoot">
-                        {{ workspaceRoot.split('/').pop() || workspaceRoot }}
-                    </span>
-                    <span v-else class="text-xs text-txt-dim italic">点击选择目录...</span>
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3.5 h-3.5 text-txt-dim group-hover:text-txt transition-colors flex-shrink-0">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
-                    </svg>
-                </div>
-                <div v-if="workspaceRoot" class="text-[10px] text-txt-dim mt-1 truncate opacity-60" :title="workspaceRoot">
-                    {{ workspaceRoot }}
-                </div>
-            </button>
-        </div>
-
-        <!-- Resources Title -->
-        <div class="flex items-center justify-between mb-3 px-1">
-            <span class="text-[11px] font-bold text-txt-dim uppercase tracking-wider">Resources</span>
-            <div class="flex items-center gap-1">
-                <button @click="showAddBookModal = true" :disabled="!workspaceRoot || isDownloading" class="text-accent hover:text-orange-300 transition-colors p-1 rounded hover:bg-subtle disabled:opacity-30 disabled:cursor-not-allowed" title="添加单本书籍（走 V2.0 完整管线）">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-                    </svg>
-                </button>
-                <button @click="loadNovels" class="text-txt-dim hover:text-txt transition-colors p-1 rounded hover:bg-subtle" title="刷新列表">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
-                    </svg>
-                </button>
-            </div>
-        </div>
-
-        <!-- Insights Panel (任务四b) — 仅在 activeTab === 'library' 且 novels.length > 0 时可见 -->
-        <template v-if="activeTab === 'library' && novels.length > 0">
-        <div class="mb-3 px-1 border border-border-dim rounded-lg bg-subtle/30">
-            <button @click="showInsights = !showInsights" class="w-full flex items-center justify-between px-2 py-2 text-[11px] font-bold text-txt-dim uppercase tracking-wider">
-                <span>📊 趋势洞察</span>
-                <span class="text-[10px] transition-transform" :class="showInsights ? 'rotate-180' : ''">▼</span>
-            </button>
-            <div v-show="showInsights" class="px-2 pb-3 space-y-3 text-[11px]">
-                <!-- 热门 tag 排行 -->
-                <div v-if="topTags.length > 0">
-                    <div class="text-txt-dim mb-1">热门题材</div>
-                    <div class="space-y-1">
-                        <div v-for="[tag, w] in topTags" :key="tag" class="flex items-center gap-2">
-                            <span class="w-16 truncate text-txt-dim">{{ tag }}</span>
-                            <div class="flex-1 h-2 rounded-full bg-subtle overflow-hidden">
-                                <div class="h-full rounded-full transition-all duration-300" :style="{ width: (w / maxTagWeight * 100) + '%', background: w >= 0 ? 'var(--accent, #f97316)' : '#ef4444' }"></div>
-                            </div>
-                            <span class="w-6 text-right text-txt-dim font-mono">{{ w > 0 ? '+' : '' }}{{ w }}</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Agent 关注热点 -->
-                <div v-if="topFocus.length > 0">
-                    <div class="text-txt-dim mb-1">高频关注点</div>
-                    <div class="flex flex-wrap gap-1">
-                        <span v-for="[kw, cnt] in topFocus" :key="kw"
-                            class="px-1.5 py-0.5 rounded text-[10px] border border-border-dim"
-                            :style="{ opacity: 0.5 + (cnt / maxFocusCount) * 0.5 }"
-                        >{{ kw }} <span class="opacity-50">{{ cnt }}</span></span>
-                    </div>
-                </div>
-
-                <!-- 共识分布 -->
-                <div>
-                    <div class="text-txt-dim mb-1">共识分布</div>
-                    <div class="flex gap-1 h-2 rounded-full overflow-hidden">
-                        <div v-for="[c, label, color] in [
-                            ['all_yes', '一致看好', '#22c55e'],
-                            ['majority_yes', '多数看好', '#10b981'],
-                            ['divergent', '分歧', '#f59e0b'],
-                            ['majority_no', '多不看好', '#f43f5e'],
-                            ['all_no', '一致不看好', '#ef4444'],
-                        ] as const" :key="c"
-                            :title="`${label}: ${consensusDistribution[c]}`"
-                            class="h-full first:rounded-l-full last:rounded-r-full transition-all"
-                            :style="{ width: (consensusDistribution[c] / novels.length * 100) + '%', backgroundColor: color, opacity: 0.8 }"
-                        ></div>
-                    </div>
-                    <div class="flex flex-wrap gap-x-2 gap-y-0.5 mt-1">
-                        <span v-for="[c, label, color] in [
-                            ['all_yes', '一致看好', '#22c55e'],
-                            ['majority_yes', '多数看好', '#10b981'],
-                            ['divergent', '分歧', '#f59e0b'],
-                            ['majority_no', '多不看好', '#f43f5e'],
-                            ['all_no', '一致不看好', '#ef4444'],
-                        ] as const" :key="c" class="text-[9px] flex items-center gap-1 text-txt-dim">
-                            <span class="w-1.5 h-1.5 rounded-full inline-block" :style="{ backgroundColor: color }"></span>
-                            {{ label }} {{ consensusDistribution[c] }}
-                        </span>
-                    </div>
-                </div>
-            </div>
-        </div>
-        </template>
-
-        <!-- Filter Bar -->
-        <div class="flex flex-col gap-2 mb-3 px-1">
-            <!-- Consensus filter -->
-            <div class="flex flex-wrap gap-1">
-                <button
-                    v-for="opt in CONSENSUS_OPTIONS"
-                    :key="opt.value"
-                    @click="toggleConsensus(opt.value!)"
-                    class="text-[10px] px-2 py-0.5 rounded border transition-all"
-                    :class="consensusFilter.includes(opt.value!) ? 'bg-accent/20 border-accent text-accent' : 'border-border-dim text-txt-dim hover:text-txt'"
-                >{{ opt.label }}</button>
-            </div>
-
-            <!-- Tag filter (limit display to keep sidebar tidy) -->
-            <div v-if="allTags.length > 0" class="flex flex-wrap gap-1 max-h-20 overflow-y-auto">
-                <button
-                    v-for="t in allTags.slice(0, 30)"
-                    :key="t"
-                    @click="toggleTag(t)"
-                    class="text-[10px] px-1.5 py-0.5 rounded border transition-all"
-                    :class="tagFilter.includes(t) ? 'bg-accent/20 border-accent text-accent' : 'border-border-dim text-txt-dim hover:text-txt'"
-                >{{ t }}</button>
-            </div>
-
-            <!-- Sort -->
-            <select
-                v-model="sortBy"
-                @change="loadNovels"
-                class="bg-input border border-border-dim rounded px-2 py-1 text-[11px] outline-none focus:border-accent"
-            >
-                <option value="updated_desc">按最近更新</option>
-                <option value="latest_rank_asc">按最近排名</option>
-                <option value="scan_count_desc">按上榜次数</option>
-            </select>
-        </div>
-
-        <!-- Novel Grid -->
-        <div class="flex-1 overflow-y-auto custom-scrollbar pb-4">
-            <div v-if="novelsLoading" class="flex flex-col items-center justify-center h-full text-txt-dim text-xs gap-2">
-                <span class="animate-spin text-2xl">⏳</span>
-                <span>加载中…</span>
-            </div>
-            <div v-else-if="novels.length === 0" class="flex flex-col items-center justify-center h-full text-txt-dim text-xs gap-3 px-4">
-                <div class="w-12 h-12 rounded-full bg-subtle flex items-center justify-center">
-                    <span class="text-2xl opacity-30">📚</span>
-                </div>
-                <div class="text-center opacity-50">书库为空<br>点击右上角 + 添加单本，或到「报告」Tab 扫榜</div>
-            </div>
-            <div v-else class="grid grid-cols-1 gap-2">
-                <NovelCard
-                    v-for="n in novels"
-                    :key="n.id"
-                    :novel="n"
-                    :selected="selectedNovel?.id === n.id"
-                    @click="selectNovel"
-                />
-            </div>
-        </div>
-        </template>
-
-        <!-- ==================== 报告 Tab ==================== -->
-        <template v-if="activeTab === 'reports'">
-        <div class="flex items-center justify-between mb-3 px-1">
-            <span class="text-[11px] font-bold text-txt-dim uppercase tracking-wider">扫榜报告</span>
-            <button @click="loadReportFiles" class="text-txt-dim hover:text-txt transition-colors p-1 rounded hover:bg-subtle" title="刷新">
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" /></svg>
-            </button>
-        </div>
-        <div class="flex flex-col gap-2 mb-3">
-            <!-- 美化后的下拉框 -->
-            <div class="relative w-full">
-                <select v-model="selectedRank" class="w-full appearance-none bg-subtle border border-border-dim text-txt text-[12px] rounded-lg pl-4 pr-10 py-2.5 outline-none focus:border-accent focus:ring-1 focus:ring-accent/30 transition-all cursor-pointer shadow-sm">
-                    <option value="">(按配置 workflow_config.json 批量扫榜)</option>
-                    <optgroup label="起点·热门排行" class="bg-subtle text-txt">
-                        <option value="qidian:https://www.qidian.com/rank/hotsales/">畅销榜</option>
-                        <option value="qidian:https://www.qidian.com/rank/yuepiao/">月票榜</option>
-                        <option value="qidian:https://www.qidian.com/rank/readindex/">阅读指数榜</option>
-                        <option value="qidian:https://www.qidian.com/rank/recom/">推荐榜</option>
-                        <option value="qidian:https://www.qidian.com/rank/newfans/">书友榜</option>
-                        <option value="qidian:https://www.qidian.com/rank/collect/">收藏榜</option>
-                        <option value="qidian:https://www.qidian.com/rank/vipup/">更新榜</option>
-                        <option value="qidian:https://www.qidian.com/rank/vipcollect/">VIP收藏榜</option>
-                    </optgroup>
-                    <optgroup label="起点·新书排行" class="bg-subtle text-txt">
-                        <option value="qidian:https://www.qidian.com/rank/signnewbook/">签约作者新书榜</option>
-                        <option value="qidian:https://www.qidian.com/rank/pubnewbook/">公众作者新书榜</option>
-                        <option value="qidian:https://www.qidian.com/rank/newsign/">新人签约新书榜</option>
-                        <option value="qidian:https://www.qidian.com/rank/newauthor/">新人作者新书榜</option>
-                    </optgroup>
-                    <optgroup label="起点·其他排行" class="bg-subtle text-txt">
-                        <option value="qidian:https://www.qidian.com/rank/mm/">女生精选榜</option>
-                        <option value="qidian:https://www.qidian.com/rank/mm/yuepiao/">女生月票榜</option>
-                    </optgroup>
-                    <optgroup label="番茄榜单 (开发中)" class="bg-subtle text-txt">
-                        <option value="fanqie:https://fanqienovel.com/rank/1_2_1141">番茄男频阅读榜</option>
-                        <option value="fanqie:https://fanqienovel.com/rank/0_2_1139">番茄女频阅读榜</option>
-                    </optgroup>
-                </select>
-                <!-- 自定义右侧箭头 -->
-                <div class="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none text-txt-dim">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4 opacity-70">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
-                    </svg>
-                </div>
-            </div>
-            <button 
-                @click="triggerFullScan"
-                :disabled="isDownloading"
-                class="w-full bg-gradient-to-r from-accent to-orange-500 text-[var(--accent-text)] font-bold py-2.5 px-4 rounded-lg hover:opacity-90 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 text-xs shadow-sm"
-            >
-                <span v-if="isDownloading" class="animate-spin text-lg">⏳</span>
-                <span>{{ isDownloading ? '后台扫榜中...' : '🚀 立即扫榜此榜单' }}</span>
-            </button>
-        </div>
-        <div class="flex-1 bg-subtle rounded-xl border border-border-dim overflow-y-auto mb-4 select-none p-2 space-y-1 custom-scrollbar">
-            <div v-if="reportFiles.length === 0" class="flex flex-col items-center justify-center h-full text-txt-dim text-xs gap-3">
-                <div class="w-12 h-12 rounded-full bg-subtle flex items-center justify-center"><span class="text-2xl opacity-30">📊</span></div>
-                <div class="text-center opacity-50">暂无报告<br>可通过系统托盘触发扫榜</div>
-            </div>
-            <div v-for="file in reportFiles" :key="file" @click="selectReport(file)"
-                class="px-3 py-2.5 rounded-lg cursor-pointer transition-all duration-200 border flex items-center gap-3"
-                :class="selectedReport === file ? 'bg-gradient-to-r from-accent/10 to-transparent border-l-2 border-l-accent border-transparent' : 'hover:bg-hover border-l-2 border-l-transparent border-transparent text-txt-dim hover:text-txt'"
-            >
-                <span class="text-lg">📊</span>
-                <div class="flex-1 min-w-0">
-                    <div class="truncate font-medium text-[12px]">{{ formatReportName(file) }}</div>
-                    <div class="text-[10px] opacity-40 truncate">{{ file }}</div>
-                </div>
-            </div>
-        </div>
-        </template>
-
         <div class="mt-auto pt-4 border-t border-border-dim flex justify-between items-center group/settings">
             <span class="text-[10px] text-txt-dim group-hover/settings:text-txt transition-colors">SETTINGS</span>
             <div class="flex gap-1">
@@ -1172,7 +925,65 @@ function formatReportName(filename: string): string {
         </div>
         <!-- ===== 书库/分析 分栏视图 ===== -->
         <template v-if="!(selectedReport && activeTab === 'reports')">
-        <div class="flex-1 grid grid-cols-2 gap-4 min-h-0">
+        <!-- 书库无选中全宽 -->
+        <div v-if="activeTab === 'library' && !selectedNovel" class="flex flex-col gap-4 pb-6 overflow-y-auto">
+            <div class="flex items-center justify-between gap-4 flex-shrink-0">
+                <button @click="selectWorkspaceDir" class="flex items-center gap-2 bg-subtle border border-border-dim rounded-lg px-3 py-2 hover:bg-hover transition-colors group min-w-0">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4 text-accent flex-shrink-0"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v12a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9a2.25 2.25 0 0 0-2.25-2.25h-5.379a1.5 1.5 0 0 1-1.06-.44Z" /></svg>
+                    <span v-if="workspaceRoot" class="text-xs text-txt truncate max-w-56" :title="workspaceRoot">{{ workspaceRoot.split('/').pop() || workspaceRoot }}</span>
+                    <span v-else class="text-xs text-txt-dim italic">选择工作目录...</span>
+                </button>
+                <div class="flex items-center gap-1">
+                    <button @click="showAddBookModal = true" :disabled="!workspaceRoot || isDownloading" class="text-accent hover:text-orange-300 transition-colors p-1.5 rounded hover:bg-subtle disabled:opacity-30" title="添加书籍">➕</button>
+                    <button @click="loadNovels" class="text-txt-dim hover:text-txt transition-colors p-1.5 rounded hover:bg-subtle" title="刷新列表">🔄</button>
+                </div>
+            </div>
+            <div class="flex flex-wrap items-center gap-2 flex-shrink-0">
+                <div class="flex flex-wrap gap-1">
+                    <button v-for="opt in CONSENSUS_OPTIONS" :key="opt.value" @click="toggleConsensus(opt.value!)" class="text-xs px-2 py-0.5 rounded border transition-all" :class="consensusFilter.includes(opt.value!) ? 'bg-accent/20 border-accent text-accent' : 'border-border-dim text-txt-dim hover:text-txt'">{{ opt.label }}</button>
+                </div>
+                <select v-model="sortBy" @change="loadNovels" class="bg-input border border-border-dim rounded px-2 py-1 text-xs outline-none focus:border-accent">
+                    <option value="updated_desc">更新</option>
+                    <option value="latest_rank_asc">排名</option>
+                    <option value="scan_count_desc">上榜</option>
+                </select>
+            </div>
+            <div v-if="allTags.length > 0" class="flex flex-wrap gap-1 flex-shrink-0">
+                <button v-for="t in allTags.slice(0, 30)" :key="t" @click="toggleTag(t)" class="text-xs px-1.5 py-0.5 rounded border transition-all" :class="tagFilter.includes(t) ? 'bg-accent/20 border-accent text-accent' : 'border-border-dim text-txt-dim hover:text-txt'">{{ t }}</button>
+            </div>
+            <div class="bg-subtle/30 border border-border-dim rounded-lg p-4 flex-shrink-0">
+                <div class="flex flex-wrap items-start gap-x-8 gap-y-3">
+                    <div v-if="topTags.length > 0">
+                        <div class="text-xs text-txt-dim mb-1.5 font-medium">热门题材</div>
+                        <div class="flex flex-wrap gap-1">
+                            <span v-for="[tag, w] in topTags.slice(0, 10)" :key="tag" class="px-2 py-0.5 rounded text-xs border transition-all" :class="topTags[0][0] === tag ? 'bg-accent/10 border-accent/30 text-accent' : 'border-border-dim text-txt-dim'">{{ tag }} <span class="font-mono">{{ w > 0 ? '+' : '' }}{{ w }}</span></span>
+                        </div>
+                    </div>
+                    <div v-if="topFocus.length > 0">
+                        <div class="text-xs text-txt-dim mb-1.5 font-medium">关注点</div>
+                        <div class="flex flex-wrap gap-1">
+                            <span v-for="[kw, cnt] in topFocus.slice(0, 8)" :key="kw" class="px-2 py-0.5 rounded text-xs border border-border-dim text-txt-dim">{{ kw }} <span class="font-mono opacity-50">{{ cnt }}</span></span>
+                        </div>
+                    </div>
+                    <div>
+                        <div class="text-xs text-txt-dim mb-1.5 font-medium">共识</div>
+                        <div class="flex flex-wrap gap-1">
+                            <span v-for="[c, label, cls] in [['all_yes','看好','bg-green-500/10 text-green-300 border-green-500/30'],['majority_yes','多看好','bg-emerald-500/10 text-emerald-300 border-emerald-500/30'],['divergent','分歧','bg-amber-500/10 text-amber-300 border-amber-500/30'],['majority_no','多不看好','bg-rose-500/10 text-rose-300 border-rose-500/30'],['all_no','不看好','bg-red-500/10 text-red-300 border-red-500/30']] as const" :key="c" class="px-2 py-0.5 rounded text-xs border" :class="cls">{{ label }} {{ consensusDistribution[c] }}</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <NovelGrid :novels="novels" :novels-loading="novelsLoading" :selected-novel-id="selectedNovelId" @select="selectNovel" />
+        </div>
+        <!-- 报告无选中 -->
+        <div v-else-if="activeTab === 'reports' && !selectedReport" class="flex flex-col gap-4 overflow-y-auto pb-6">
+            <div class="flex items-center justify-between"><span class="text-xs font-bold text-txt-dim uppercase tracking-wider">扫榜报告</span><button @click="loadReportFiles" class="text-txt-dim hover:text-txt p-1 rounded hover:bg-subtle">🔄</button></div>
+            <select v-model="selectedRank" class="w-full bg-subtle border border-border-dim text-txt text-xs rounded-lg px-4 py-2.5 outline-none focus:border-accent cursor-pointer"><option value="">（按 workflow_config.json 批量扫榜）</option></select>
+            <button @click="triggerFullScan" :disabled="isDownloading" class="w-full bg-gradient-to-r from-accent to-orange-500 text-[var(--accent-text)] font-bold py-2.5 px-4 rounded-lg hover:opacity-90 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 text-xs shadow-sm"><span v-if="isDownloading" class="animate-spin">⏳</span><span>{{ isDownloading ? '后台扫榜中...' : '🚀 立即扫榜' }}</span></button>
+            <div class="flex-1 bg-subtle rounded-xl border border-border-dim overflow-y-auto p-2 space-y-1"><div v-if="reportFiles.length === 0" class="flex items-center justify-center h-32 text-txt-dim text-xs">暂无报告</div><template v-for="file in reportFiles" :key="file"><div @click="selectReport(file)" class="px-3 py-2.5 rounded-lg cursor-pointer transition-all border flex items-center gap-3" :class="selectedReport === file ? 'bg-gradient-to-r from-accent/10 to-transparent border-l-2 border-l-accent' : 'hover:bg-hover border-l-2 border-l-transparent text-txt-dim hover:text-txt'"><span>📊</span><div class="flex-1 min-w-0"><div class="truncate font-medium text-xs">{{ formatReportName(file) }}</div><div class="text-[10px] opacity-40 truncate">{{ file }}</div></div></div></template></div>
+        </div>
+        <!-- 选中书籍时分栏 -->
+        <div v-else class="flex-1 grid grid-cols-2 gap-4 min-h-0">
             <!-- Left: Original Content / Metadata View -->
             <div class="bg-card rounded-lg border border-border flex flex-col overflow-hidden">
                 <div class="bg-white/5 px-4 py-2 border-b border-border flex justify-between items-center text-sm font-bold">
@@ -1291,7 +1102,6 @@ function formatReportName(filename: string): string {
             </div>
         </div>
         </template>
-
         <!-- Log / Progress Footer -->
         <div class="h-8 bg-sidebar rounded flex items-center px-4 gap-4 text-xs text-gray-400 flex-shrink-0">
              <button @click="openLogs" class="bg-black/20 hover:bg-black/40 px-2 py-0.5 rounded text-accent transition-colors flex items-center gap-1">
