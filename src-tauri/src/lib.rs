@@ -10,7 +10,7 @@ mod tests;
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
 use tauri::menu::{Menu, MenuItem};
@@ -18,6 +18,89 @@ use tauri::tray::TrayIconBuilder;
 use chrono::Local;
 
 // ... (Keep existing ai logic)
+
+#[derive(Clone, serde::Serialize)]
+struct ScanRunStatus {
+    status: String,
+    message: String,
+}
+
+#[derive(serde::Serialize)]
+struct WorkflowConfigPayload {
+    enabled: bool,
+    schedule_time: String,
+    rank_urls: Vec<String>,
+}
+
+fn workflow_config_path() -> PathBuf {
+    get_project_root().join("workflow_config.json")
+}
+
+fn default_workflow_config() -> serde_json::Value {
+    serde_json::json!({
+        "enabled": false,
+        "schedule_time": "03:00",
+        "rank_urls": [
+            "https://www.qidian.com/rank/yuepiao/",
+            "https://www.qidian.com/rank/hotsales/"
+        ],
+        "ai": {
+            "api_base": "",
+            "api_key": "",
+            "model": ""
+        }
+    })
+}
+
+fn write_workflow_config(config: &serde_json::Value) -> Result<(), String> {
+    let path = workflow_config_path();
+    let content = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
+    fs::write(path, content).map_err(|e| e.to_string())
+}
+
+pub(crate) fn ensure_workflow_config() -> Result<serde_json::Value, String> {
+    let path = workflow_config_path();
+    if !path.exists() {
+        let config = default_workflow_config();
+        write_workflow_config(&config)?;
+        return Ok(config);
+    }
+
+    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut config = serde_json::from_str::<serde_json::Value>(&content).map_err(|e| e.to_string())?;
+
+    if !config.is_object() {
+        return Err("workflow_config.json 格式错误：根节点必须为对象".to_string());
+    }
+
+    let defaults = default_workflow_config();
+    if let (Some(current), Some(default_obj)) = (config.as_object_mut(), defaults.as_object()) {
+        for (key, value) in default_obj {
+            current.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+
+    write_workflow_config(&config)?;
+    Ok(config)
+}
+
+fn sync_ai_config_to_workflow_config(config: &crate::ai::AiConfig) -> Result<(), String> {
+    let mut workflow = ensure_workflow_config()?;
+    let root = workflow
+        .as_object_mut()
+        .ok_or_else(|| "workflow_config.json 格式错误".to_string())?;
+
+    root.insert(
+        "ai".to_string(),
+        serde_json::json!({
+            "api_base": config.api_base,
+            "api_key": config.api_key,
+            "model": config.model
+        }),
+    );
+
+    write_workflow_config(&workflow)
+}
 
 #[tauri::command]
 async fn start_ai_analysis(
@@ -185,22 +268,53 @@ fn read_report(workspace_root: String, filename: String) -> Result<String, Strin
 }
 
 #[tauri::command]
+fn get_workflow_config() -> Result<WorkflowConfigPayload, String> {
+    let config = ensure_workflow_config()?;
+    Ok(WorkflowConfigPayload {
+        enabled: config.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false),
+        schedule_time: config
+            .get("schedule_time")
+            .and_then(|v| v.as_str())
+            .unwrap_or("03:00")
+            .to_string(),
+        rank_urls: config
+            .get("rank_urls")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
+}
+
+#[tauri::command]
 async fn trigger_full_scan(app: tauri::AppHandle, target_url: Option<String>, platform: Option<String>) -> Result<(), String> {
     // 异步执行，不阻塞前端
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
-        let _ = trigger_full_scan_internal(&app_clone, target_url, platform).await;
+        let status = match trigger_full_scan_internal(&app_clone, target_url, platform).await {
+            Ok(true) => ScanRunStatus {
+                status: "completed".to_string(),
+                message: "扫榜任务完成，已生成或更新结果。".to_string(),
+            },
+            Ok(false) => ScanRunStatus {
+                status: "completed".to_string(),
+                message: "任务执行完毕，但没有生成可用报告。".to_string(),
+            },
+            Err(e) => ScanRunStatus {
+                status: "failed".to_string(),
+                message: e,
+            },
+        };
+        let _ = app_clone.emit("scan-run-status", status);
     });
     Ok(())
 }
 
-async fn trigger_full_scan_internal(app_handle: &tauri::AppHandle, target_url: Option<String>, platform_opt: Option<String>) -> Result<(), String> {
+async fn trigger_full_scan_internal(app_handle: &tauri::AppHandle, target_url: Option<String>, platform_opt: Option<String>) -> Result<bool, String> {
     println!("Manual trigger from frontend/tray: scan started");
-    let project_root = get_project_root();
-    let config_path = project_root.join("workflow_config.json");
-
-    let content = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
-    let config = serde_json::from_str::<serde_json::Value>(&content).map_err(|e| e.to_string())?;
 
     // 从 Tauri State 读取工作目录（与前端选择一致）
     let workspace_root = get_workspace_root(app_handle);
@@ -227,8 +341,9 @@ async fn trigger_full_scan_internal(app_handle: &tauri::AppHandle, target_url: O
                 aggregated_report.push_str("\n\n---\n\n");
             }
             Err(e) => eprintln!("Manual: Pipeline failed for {}: {}", target, e),
-        }
+            }
     } else {
+        let config = ensure_workflow_config()?;
         if let Some(rank_urls) = config["rank_urls"].as_array() {
             println!("Manual: Found {} rank URLs to process.", rank_urls.len());
             for rank_url_val in rank_urls {
@@ -253,7 +368,7 @@ async fn trigger_full_scan_internal(app_handle: &tauri::AppHandle, target_url: O
             }
         } else {
             eprintln!("Manual: 'rank_urls' not found or not an array in config.");
-            return Err("No rank URLs found in config".to_string());
+            return Err("workflow_config.json 中缺少 rank_urls".to_string());
         }
     }
     
@@ -266,14 +381,12 @@ async fn trigger_full_scan_internal(app_handle: &tauri::AppHandle, target_url: O
         let report_path = reports_dir.join(format!("manual_report_{}.md", chrono::Local::now().format("%Y%m%d_%H%M%S")));
         let _ = std::fs::write(report_path, full_report);
         println!("Manual pipeline: report saved.");
+        let _ = app_handle.emit("report-generated", ());
     } else {
         println!("Manual pipeline: all targets failed, no report saved.");
     }
 
-    // 发送事件通知前端更新列表
-    let _ = app_handle.emit("report-generated", ());
-
-    Ok(())
+    Ok(any_success)
 }
 
 #[tauri::command]
@@ -288,6 +401,10 @@ async fn update_ai_config(app: tauri::AppHandle, api_base: String, api_key: Stri
     let config = crate::ai::AiConfig { api_base, api_key, model };
     let state = app.state::<crate::ai::GlobalAiConfig>();
     *state.0.lock().map_err(|e| e.to_string())? = Some(config);
+    let saved = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(cfg) = saved.as_ref() {
+        sync_ai_config_to_workflow_config(cfg)?;
+    }
     println!("AI config updated via frontend settings");
     Ok(())
 }
@@ -434,6 +551,7 @@ pub fn run() {
             ensure_workspace_dirs,
             list_reports,
             read_report,
+            get_workflow_config,
             trigger_full_scan,
             update_ai_config,
             set_workspace_root,

@@ -48,6 +48,8 @@ const activeTab = ref<'library' | 'reports'>('library');
 const reportFiles = ref<string[]>([]);
 const selectedReport = ref<string | null>(null);
 const reportContent = ref('');
+const rankOptions = ref<{ value: string; label: string }[]>([]);
+const workflowConfig = ref<WorkflowConfigPayload | null>(null);
 
 // 从报告内容中提取目录
 const reportToc = computed(() => {
@@ -81,9 +83,21 @@ interface PipelineProgress {
     message: string;
     progress: [number, number] | null;      // (done, total)
 }
+
+interface ScanRunStatus {
+    status: 'completed' | 'failed';
+    message: string;
+}
+
+interface WorkflowConfigPayload {
+    enabled: boolean;
+    schedule_time: string;
+    rank_urls: string[];
+}
 const currentPhase = ref<PipelineProgress | null>(null);
 
 const isDownloading = ref(false);
+const isEvaluatingNovel = ref(false);
 
 const downloadLog = ref<string[]>([]);
 
@@ -242,6 +256,39 @@ function selectNovel(novel: NovelListRow) {
     splitContent.value = '';
 }
 
+async function evaluateSelectedNovel() {
+    if (!selectedNovel.value) return;
+    if (!aiConfig.value.apiKey) {
+        showSettings.value = true;
+        alert("请先配置 AI API Key");
+        return;
+    }
+
+    isEvaluatingNovel.value = true;
+    try {
+        await invoke('update_ai_config', {
+            apiBase: aiConfig.value.apiBase,
+            apiKey: aiConfig.value.apiKey,
+            model: aiConfig.value.model
+        });
+        downloadLog.value.push(`[${new Date().toLocaleTimeString()}] 正在重新评估《${selectedNovel.value.title}》...`);
+        await invoke<string>('evaluate_novel', { novelId: selectedNovel.value.id });
+        await loadNovels();
+
+        const refreshed = novels.value.find(n => n.id === selectedNovel.value?.id);
+        if (refreshed) {
+            selectedNovel.value = refreshed;
+        }
+        downloadLog.value.push(`[${new Date().toLocaleTimeString()}] 《${selectedNovel.value.title}》评估完成。`);
+    } catch (e) {
+        console.error("Failed to evaluate novel:", e);
+        alert(`评估失败: ${e}`);
+        downloadLog.value.push(`[${new Date().toLocaleTimeString()}] 评估失败: ${e}`);
+    } finally {
+        isEvaluatingNovel.value = false;
+    }
+}
+
 // --- AI Settings ---
 const showSettings = ref(false);
 const aiConfig = ref({
@@ -278,6 +325,29 @@ async function saveSettings() {
     }
     
     showSettings.value = false;
+}
+
+function formatRankOption(url: string): { value: string; label: string } {
+    const platform = url.includes('fanqie') ? 'fanqie' : 'qidian';
+    const normalized = url.replace(/^https?:\/\//, '').replace(/\/$/, '');
+    const tail = normalized.split('/').slice(-2).join(' / ');
+    const prefix = platform === 'fanqie' ? '番茄' : '起点';
+    return {
+        value: `${platform}:${url}`,
+        label: `${prefix} · ${tail || normalized}`
+    };
+}
+
+async function loadWorkflowConfig() {
+    try {
+        const config = await invoke<WorkflowConfigPayload>('get_workflow_config');
+        workflowConfig.value = config;
+        rankOptions.value = config.rank_urls.map(formatRankOption);
+    } catch (e) {
+        console.error("Failed to load workflow config:", e);
+        workflowConfig.value = null;
+        rankOptions.value = [];
+    }
 }
 
 // --- Workspace Directory Selection ---
@@ -419,6 +489,19 @@ onMounted(async () => {
         refreshTreeFiles();
     });
 
+    listen<ScanRunStatus>("scan-run-status", (event) => {
+        const payload = event.payload;
+        isDownloading.value = false;
+        currentPhase.value = null;
+        const line = `[${new Date().toLocaleTimeString()}] ${payload.message}`;
+        downloadLog.value.push(line);
+        logContent.value += `${line}\n`;
+        if (payload.status === 'completed') {
+            loadReportFiles();
+            loadNovels();
+        }
+    });
+
     listen<PipelineProgress>("pipeline-progress", (event) => {
         const payload = event.payload;
         currentPhase.value = payload;
@@ -446,6 +529,7 @@ onMounted(async () => {
     
     refreshTreeFiles();
     loadReportFiles();
+    loadWorkflowConfig();
     loadNovels();
 });
 
@@ -800,6 +884,10 @@ async function loadReportFiles() {
 const selectedRank = ref('');
 
 async function triggerFullScan() {
+    if (!workspaceRoot.value) {
+        alert("请先选择工作目录");
+        return;
+    }
     isDownloading.value = true;
     logContent.value += `[${new Date().toLocaleTimeString()}] 已触发后台全量扫榜任务...\n`;
     activeTab.value = 'reports'; // 切换到报告页
@@ -877,8 +965,8 @@ function formatReportName(filename: string): string {
         <!-- Tab Switcher -->
         <div class="bg-subtle p-1 rounded-lg flex mb-6 relative border border-border-dim">
             <div class="absolute top-1 bottom-1 rounded-md bg-active border border-border-dim shadow-sm transition-all duration-300 ease-out" :style="{ left: activeTab === 'library' ? '4px' : 'calc(50% + 1px)', width: 'calc(50% - 5px)' }"></div>
-            <button @click="activeTab = 'library'" class="flex-1 relative z-10 text-xs font-medium py-1.5 text-center transition-colors duration-200" :class="activeTab === 'library' ? 'text-txt' : 'text-txt-dim hover:text-txt'">📚 书库</button>
-            <button @click="activeTab = 'reports'; loadReportFiles()" class="flex-1 relative z-10 text-xs font-medium py-1.5 text-center transition-colors duration-200" :class="activeTab === 'reports' ? 'text-txt' : 'text-txt-dim hover:text-txt'">📊 报告</button>
+            <button @click="activeTab = 'library'" class="flex-1 relative z-10 text-xs font-medium py-1.5 text-center transition-colors duration-200" :class="activeTab === 'library' ? 'text-txt' : 'text-txt-dim hover:text-txt'">📚 对标拆书</button>
+            <button @click="activeTab = 'reports'; loadReportFiles()" class="flex-1 relative z-10 text-xs font-medium py-1.5 text-center transition-colors duration-200" :class="activeTab === 'reports' ? 'text-txt' : 'text-txt-dim hover:text-txt'">📊 选题雷达</button>
         </div>
 
         <div class="mt-auto pt-4 border-t border-border-dim flex justify-between items-center group/settings">
@@ -977,8 +1065,15 @@ function formatReportName(filename: string): string {
         </div>
         <!-- 报告无选中 -->
         <div v-else-if="activeTab === 'reports' && !selectedReport" class="flex flex-col gap-4 overflow-y-auto pb-6">
-            <div class="flex items-center justify-between"><span class="text-xs font-bold text-txt-dim uppercase tracking-wider">扫榜报告</span><button @click="loadReportFiles" class="text-txt-dim hover:text-txt p-1 rounded hover:bg-subtle">🔄</button></div>
-            <select v-model="selectedRank" class="w-full bg-subtle border border-border-dim text-txt text-xs rounded-lg px-4 py-2.5 outline-none focus:border-accent cursor-pointer"><option value="">（按 workflow_config.json 批量扫榜）</option></select>
+            <div class="flex items-center justify-between"><span class="text-xs font-bold text-txt-dim uppercase tracking-wider">选题雷达</span><button @click="loadReportFiles" class="text-txt-dim hover:text-txt p-1 rounded hover:bg-subtle">🔄</button></div>
+            <select v-model="selectedRank" class="w-full bg-subtle border border-border-dim text-txt text-xs rounded-lg px-4 py-2.5 outline-none focus:border-accent cursor-pointer">
+                <option value="">（按 workflow_config.json 批量扫榜）</option>
+                <option v-for="opt in rankOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+            </select>
+            <div class="bg-subtle/30 border border-border-dim rounded-lg p-3 text-xs text-txt-dim">
+                <div>监控榜单 {{ workflowConfig?.rank_urls.length ?? 0 }} 个</div>
+                <div v-if="workflowConfig">定时任务 {{ workflowConfig.enabled ? `已开启 ${workflowConfig.schedule_time}` : '未开启' }}</div>
+            </div>
             <button @click="triggerFullScan" :disabled="isDownloading" class="w-full bg-gradient-to-r from-accent to-orange-500 text-[var(--accent-text)] font-bold py-2.5 px-4 rounded-lg hover:opacity-90 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 text-xs shadow-sm"><span v-if="isDownloading" class="animate-spin">⏳</span><span>{{ isDownloading ? '后台扫榜中...' : '🚀 立即扫榜' }}</span></button>
             <div class="flex-1 bg-subtle rounded-xl border border-border-dim overflow-y-auto p-2 space-y-1"><div v-if="reportFiles.length === 0" class="flex items-center justify-center h-32 text-txt-dim text-xs">暂无报告</div><template v-for="file in reportFiles" :key="file"><div @click="selectReport(file)" class="px-3 py-2.5 rounded-lg cursor-pointer transition-all border flex items-center gap-3" :class="selectedReport === file ? 'bg-gradient-to-r from-accent/10 to-transparent border-l-2 border-l-accent' : 'hover:bg-hover border-l-2 border-l-transparent text-txt-dim hover:text-txt'"><span>📊</span><div class="flex-1 min-w-0"><div class="truncate font-medium text-xs">{{ formatReportName(file) }}</div><div class="text-[10px] opacity-40 truncate">{{ file }}</div></div></div></template></div>
         </div>
@@ -1008,10 +1103,19 @@ function formatReportName(filename: string): string {
                         <span v-for="tag in selectedNovel.tags" :key="tag" class="px-2 py-0.5 bg-subtle border border-border-dim rounded text-[11px] text-txt-dim">{{ tag }}</span>
                     </div>
 
+                    <div class="flex gap-2 mb-5">
+                        <button @click="evaluateSelectedNovel" :disabled="isEvaluatingNovel || !aiConfig.apiKey" class="flex-1 py-2 text-xs rounded-lg border border-accent/30 text-accent hover:bg-accent/10 transition-all disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-1.5">
+                            <span>{{ isEvaluatingNovel ? '⏳' : '🤖' }}</span> {{ isEvaluatingNovel ? '评估中…' : '重新评估' }}
+                        </button>
+                    </div>
+
                     <div v-if="selectedNovel.ai_reviews" class="space-y-4">
                         <div class="bg-subtle p-4 rounded-lg border border-border-dim">
-                            <div class="text-xs text-accent mb-2 uppercase tracking-wider font-bold">🎯 共识</div>
+                            <div class="text-xs text-accent mb-2 uppercase tracking-wider font-bold">🎯 拆书判断</div>
                             <div class="text-sm">{{ selectedNovel.ai_reviews.consensus ?? '—' }}</div>
+                            <div v-if="selectedNovel.ai_reviews.meta?.input_chapters" class="text-[11px] text-txt-dim mt-2">
+                                基于前 {{ selectedNovel.ai_reviews.meta.input_chapters }} 章样本
+                            </div>
                         </div>
 
                         <div v-for="(agentKey, idx) in (['reader','editor','author'] as const)" :key="agentKey">
