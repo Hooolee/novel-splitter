@@ -42,14 +42,40 @@ const activeTab = ref<'library' | 'reports'>('library');
 const reportFiles = ref<string[]>([]);
 const selectedReport = ref<string | null>(null);
 const reportContent = ref('');
-const rankOptions = [
-    { value: 'qidian:https://www.qidian.com/rank/yuepiao/', label: '起点 · 月票榜' },
-    { value: 'qidian:https://www.qidian.com/rank/hotsales/', label: '起点 · 畅销榜' },
-    { value: 'qidian:https://www.qidian.com/rank/newbook/', label: '起点 · 新书榜' },
-    { value: 'qidian:https://www.qidian.com/rank/newsign/', label: '起点 · 新人签约新书榜' },
-    { value: 'qidian:https://www.qidian.com/rank/recom/', label: '起点 · 原创推荐榜' },
-    { value: 'qidian:https://www.qidian.com/rank/sanjiang/', label: '起点 · 三江推荐榜' },
-] as const;
+type RankOption = {
+    value: string;
+    label: string;
+};
+
+type RankOptionGroup = {
+    group: string;
+    items: RankOption[];
+};
+
+const rankOptionGroups: RankOptionGroup[] = [
+    {
+        group: '起点男生榜',
+        items: [
+            { value: 'qidian:https://www.qidian.com/rank/yuepiao/', label: '月票榜' },
+            { value: 'qidian:https://www.qidian.com/rank/hotsales/', label: '畅销榜' },
+            { value: 'qidian:https://www.qidian.com/rank/recom/', label: '推荐榜' },
+            { value: 'qidian:https://www.qidian.com/rank/collect/', label: '收藏榜' },
+            { value: 'qidian:https://www.qidian.com/rank/vipup/', label: '更新榜' },
+            { value: 'qidian:https://www.qidian.com/rank/signnewbook/', label: '签约作者新书榜' },
+            { value: 'qidian:https://www.qidian.com/rank/pubnewbook/', label: '公众作者新书榜' },
+            { value: 'qidian:https://www.qidian.com/rank/newsign/', label: '新人签约新书榜' },
+            { value: 'qidian:https://www.qidian.com/rank/newauthor/', label: '新人作者新书榜' },
+        ],
+    },
+    {
+        group: '起点女生榜',
+        items: [
+            { value: 'qidian:https://www.qidian.com/rank/mm/', label: '女生精选榜' },
+            { value: 'qidian:https://www.qidian.com/rank/mm/yuepiao/', label: '女生月票榜' },
+        ],
+    },
+];
+const rankOptions = rankOptionGroups.flatMap(group => group.items);
 
 // 从报告内容中提取目录
 const reportToc = computed(() => {
@@ -613,7 +639,7 @@ async function loadReportFiles() {
         reportFiles.value = [];
     }
 }
-const selectedRank = ref<(typeof rankOptions)[number]['value']>(rankOptions[0].value);
+const selectedRank = ref<string>(rankOptions[0].value);
 
 async function triggerFullScan() {
     if (!workspaceRoot.value) {
@@ -835,7 +861,9 @@ function formatReportName(filename: string): string {
                 <div>默认起点可直接切换，扫榜只走常用榜单。</div>
             </div>
             <select v-model="selectedRank" class="w-full bg-subtle border border-border-dim text-txt text-xs rounded-lg px-4 py-2.5 outline-none focus:border-accent cursor-pointer">
-                <option v-for="opt in rankOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+                <optgroup v-for="group in rankOptionGroups" :key="group.group" :label="group.group">
+                    <option v-for="opt in group.items" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+                </optgroup>
             </select>
             <div class="flex-1 bg-subtle rounded-xl border border-border-dim overflow-y-auto p-2 space-y-1"><div v-if="reportFiles.length === 0" class="flex items-center justify-center h-32 text-txt-dim text-xs">暂无报告</div><template v-for="file in reportFiles" :key="file"><div @click="selectReport(file)" class="px-3 py-2.5 rounded-lg cursor-pointer transition-all border flex items-center gap-3" :class="selectedReport === file ? 'bg-gradient-to-r from-accent/10 to-transparent border-l-2 border-l-accent' : 'hover:bg-hover border-l-2 border-l-transparent text-txt-dim hover:text-txt'"><span>📊</span><div class="flex-1 min-w-0"><div class="truncate font-medium text-xs">{{ formatReportName(file) }}</div><div class="text-[10px] opacity-40 truncate">{{ file }}</div></div></div></template></div>
         </div>

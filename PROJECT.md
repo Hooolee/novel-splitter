@@ -53,7 +53,7 @@
 - `书库` 负责书库卡片网格，每张卡片提供「🔍 对标拆书」按钮，点击进入单书详情
 - `拆书雷达` 负责榜单洞察、扫榜触发、报告列表
 - 单书详情视图独立于 tab；顶部有「← 返回书库」按钮；切 tab 时自动重置 `selectedNovel`
-- 扫榜下拉硬编码 7 个起点常用榜单（`yuepiao` / `hotsales` / `newbook` / `mvp` / `signnewbook` / `fanben` / `vipclick`），不再从 `workflow_config.json` 读 `rank_urls`
+- 扫榜下拉硬编码 2 组共 11 个起点榜单：起点男生榜（`yuepiao` / `hotsales` / `recom` / `collect` / `vipup` / `signnewbook` / `pubnewbook` / `newsign` / `newauthor`）与起点女生榜（`mm` / `mm/yuepiao`），不再从 `workflow_config.json` 读 `rank_urls`
 - `consensus` 在 UI 上需要中文映射
 - 详情页和报告页都以数据库为准
 
