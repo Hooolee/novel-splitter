@@ -20,6 +20,13 @@
 - 回执前先确认 `reply_to` 和目标对象
 - 日常更新不要用 `@all`
 - 终端输出不算消息送达
+- foreman 角色 ≠ 全栈执行者：开工前先看 task assignee，不是 self 就只能派单或 hand-off，不要代做；已经代做的产物只能让原 assignee 做 verify-and-close 收尾
+
+## 派单前置
+
+- 派单前跑一次 `git status --short`
+- 识别不在本轮范畴的脏改动，先和用户对齐处理方案（保留 / stash / 单独提交 / 丢弃），再开工
+- 派单 checklist 必须显式划定文件 / 模块边界，避免接手方误把脏改动卷进本轮
 
 ## 验证规则
 
@@ -27,6 +34,7 @@
 - 需要证据时贴真实命令输出
 - `cargo check`、`cargo test`、`npm run build` 是默认验证顺序
 - 如果改动涉及流程闭环，再补 `cargo run --bin pipeline_e2e -- --mock`
+- 汇报 commit 完成时，**同一条消息**必须附 commit hash + 双绿尾部输出（`npm run build` 末 ~8 行 + `cargo check` 末 1 行）；缺一就要求补齐，不接受「已双绿已提交」一类描述
 
 ## 写作规则
 

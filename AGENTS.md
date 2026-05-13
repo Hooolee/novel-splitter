@@ -19,6 +19,7 @@
 - 需要验证时，优先贴真实命令输出
 - `git log`、`cargo check`、`cargo test`、`npm run build` 这类结果要保留尾部真实输出
 - 过程反馈里提到的“已验证”必须能追溯到命令结果
+- 汇报 commit 完成时，**同一条消息**必须附 commit hash + 双绿命令尾部输出（`npm run build` 末 ~8 行 + `cargo check` 末 1 行）；不要先发「已双绿已提交」再被追问补 evidence
 
 ## 回复规则
 
