@@ -1,7 +1,0 @@
-{"file": ".trellis/spec/frontend/quality.md", "reason": "前端质量基线与提交前检查清单"}
-{"file": ".trellis/spec/frontend/type-safety.md", "reason": "校验 computed 聚合函数类型安全，无 any"}
-{"file": ".trellis/spec/frontend/state-management.md", "reason": "校验聚合逻辑放 computed 而非 watch/mutate，ref 命名合理"}
-{"file": ".trellis/spec/frontend/css-layout.md", "reason": "校验面板可折叠、热度条/分布条与皮肤变量一致"}
-{"file": ".trellis/spec/frontend/components.md", "reason": "如抽组件则复核 SFC 规范"}
-{"file": ".trellis/spec/guides/pre-implementation-checklist.md", "reason": "对照 checklist 复核完成度"}
-{"file": ".trellis/spec/guides/testing-responsibility.md", "reason": "纯 UI 改动按自测原则复核"}
