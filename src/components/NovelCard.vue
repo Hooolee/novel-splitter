@@ -7,6 +7,16 @@ export interface AiReviewsAgent {
   comment?: string;
 }
 
+export interface AiReviewsBreakdown {
+  goldfinger_type?: string;
+  protagonist_archetype?: string;
+  opening_hook?: string;
+  hook_density?: string;
+  pacing_notes?: string;
+  chapter_end_hook_types?: string[] | string;
+  learning_points?: string[] | string;
+}
+
 export interface AiReviews {
   agents?: {
     reader?: AiReviewsAgent | null;
@@ -14,6 +24,7 @@ export interface AiReviews {
     author?: AiReviewsAgent | null;
   };
   consensus?: 'all_yes' | 'all_no' | 'majority_yes' | 'majority_no' | 'divergent';
+  breakdown?: AiReviewsBreakdown | null;
   meta?: { model?: string; generated_at?: string; input_chapters?: number };
 }
 
@@ -75,13 +86,16 @@ function voteIcon(v: 'yes' | 'no' | 'maybe' | null): string {
 <template>
   <div
     @click="emit('click', novel)"
-    class="bg-card border border-border rounded-lg p-3 cursor-pointer transition-all hover:border-accent/50 hover:shadow-md flex flex-col gap-2"
-    :class="selected ? 'border-accent ring-1 ring-accent/30' : ''"
+    class="bg-card border border-border rounded-lg p-3 cursor-pointer transition-all duration-200 hover:border-accent/50 hover:shadow-md hover:-translate-y-0.5 flex flex-col gap-2"
+    :class="selected ? 'border-accent ring-1 ring-accent/30 scale-[1.01]' : ''"
   >
     <div class="flex items-start gap-2">
-      <h4 class="flex-1 font-bold text-sm text-txt truncate" :title="novel.title">
-        {{ novel.title }}
-      </h4>
+      <div class="flex-1 min-w-0">
+        <h4 class="font-bold text-sm text-txt truncate" :title="novel.title">
+          {{ novel.title }}
+        </h4>
+        <div v-if="novel.author" class="text-[10px] text-txt-dim truncate mt-0.5">{{ novel.author }}</div>
+      </div>
       <span v-if="novel.latest_rank !== null" class="text-[10px] px-1.5 py-0.5 rounded bg-accent/10 text-accent font-mono whitespace-nowrap">
         #{{ novel.latest_rank }}
       </span>
@@ -109,10 +123,18 @@ function voteIcon(v: 'yes' | 'no' | 'maybe' | null): string {
       </div>
     </div>
 
-    <div class="flex justify-between text-[10px] text-txt-dim border-t border-border-dim pt-1.5 mt-auto">
-      <span v-if="novel.word_count">{{ (novel.word_count / 10000).toFixed(1) }}w 字</span>
-      <span v-else class="opacity-50">—</span>
-      <span>上榜 {{ novel.scan_count }} 次</span>
+    <div class="flex items-center justify-between gap-2 border-t border-border-dim pt-1.5 mt-auto">
+      <div class="flex flex-col text-[10px] text-txt-dim leading-tight">
+        <span v-if="novel.word_count">{{ (novel.word_count / 10000).toFixed(1) }}w 字</span>
+        <span v-else class="opacity-50">—</span>
+        <span>上榜 {{ novel.scan_count }} 次</span>
+      </div>
+      <button
+        @click.stop="emit('click', novel)"
+        class="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-accent/30 text-[10px] text-accent bg-accent/5 hover:bg-accent/10 transition-colors"
+      >
+        🔍 对标拆书
+      </button>
     </div>
   </div>
 </template>

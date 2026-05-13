@@ -869,7 +869,15 @@ function formatReportName(filename: string): string {
             <!-- Left: DB Detail View -->
             <div class="bg-card rounded-lg border border-border flex flex-col overflow-hidden">
                 <div class="bg-white/5 px-4 py-2 border-b border-border flex justify-between items-center text-sm font-bold">
-                    <span>📖 单书详情</span>
+                    <div class="flex items-center gap-2 min-w-0">
+                        <button
+                            @click="selectedNovel = null"
+                            class="text-xs text-accent hover:text-orange-300 transition-colors px-2 py-1 rounded-md border border-accent/20 bg-accent/5"
+                        >
+                            ← 返回书库
+                        </button>
+                        <span>📖 单书详情</span>
+                    </div>
                     <span class="font-normal text-gray-500 text-xs">数据库详情</span>
                 </div>
                 
