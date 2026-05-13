@@ -42,8 +42,14 @@ const activeTab = ref<'library' | 'reports'>('library');
 const reportFiles = ref<string[]>([]);
 const selectedReport = ref<string | null>(null);
 const reportContent = ref('');
-const rankOptions = ref<{ value: string; label: string }[]>([]);
-const workflowConfig = ref<WorkflowConfigPayload | null>(null);
+const rankOptions = [
+    { value: 'qidian:https://www.qidian.com/rank/yuepiao/', label: '起点 · 月票榜' },
+    { value: 'qidian:https://www.qidian.com/rank/hotsales/', label: '起点 · 畅销榜' },
+    { value: 'qidian:https://www.qidian.com/rank/newbook/', label: '起点 · 新书榜' },
+    { value: 'qidian:https://www.qidian.com/rank/newsign/', label: '起点 · 新人签约新书榜' },
+    { value: 'qidian:https://www.qidian.com/rank/recom/', label: '起点 · 原创推荐榜' },
+    { value: 'qidian:https://www.qidian.com/rank/sanjiang/', label: '起点 · 三江推荐榜' },
+] as const;
 
 // 从报告内容中提取目录
 const reportToc = computed(() => {
@@ -81,12 +87,6 @@ interface PipelineProgress {
 interface ScanRunStatus {
     status: 'completed' | 'failed';
     message: string;
-}
-
-interface WorkflowConfigPayload {
-    enabled: boolean;
-    schedule_time: string;
-    rank_urls: string[];
 }
 const currentPhase = ref<PipelineProgress | null>(null);
 
@@ -397,29 +397,6 @@ async function saveSettings() {
     showSettings.value = false;
 }
 
-function formatRankOption(url: string): { value: string; label: string } {
-    const platform = url.includes('fanqie') ? 'fanqie' : 'qidian';
-    const normalized = url.replace(/^https?:\/\//, '').replace(/\/$/, '');
-    const tail = normalized.split('/').slice(-2).join(' / ');
-    const prefix = platform === 'fanqie' ? '番茄' : '起点';
-    return {
-        value: `${platform}:${url}`,
-        label: `${prefix} · ${tail || normalized}`
-    };
-}
-
-async function loadWorkflowConfig() {
-    try {
-        const config = await invoke<WorkflowConfigPayload>('get_workflow_config');
-        workflowConfig.value = config;
-        rankOptions.value = config.rank_urls.map(formatRankOption);
-    } catch (e) {
-        console.error("Failed to load workflow config:", e);
-        workflowConfig.value = null;
-        rankOptions.value = [];
-    }
-}
-
 // --- Workspace Directory Selection ---
 async function selectWorkspaceDir() {
     try {
@@ -551,7 +528,6 @@ onMounted(async () => {
     // Strategy 2: Periodic refresh while downloading (every 2s) to catch new folders
     loadReportFiles();
     loadReportInsights();
-    loadWorkflowConfig();
     loadNovels();
 });
 
@@ -637,7 +613,7 @@ async function loadReportFiles() {
         reportFiles.value = [];
     }
 }
-const selectedRank = ref('');
+const selectedRank = ref<(typeof rankOptions)[number]['value']>(rankOptions[0].value);
 
 async function triggerFullScan() {
     if (!workspaceRoot.value) {
@@ -853,15 +829,14 @@ function formatReportName(filename: string): string {
                     </div>
                 </div>
             </div>
+            <button @click="triggerFullScan" :disabled="isDownloading" class="w-full bg-gradient-to-r from-accent to-orange-500 text-[var(--accent-text)] font-bold py-2.5 px-4 rounded-lg hover:opacity-90 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 text-xs shadow-sm"><span v-if="isDownloading" class="animate-spin">⏳</span><span>{{ isDownloading ? '后台扫榜中...' : '🚀 立即扫榜' }}</span></button>
+            <div class="bg-subtle/30 border border-border-dim rounded-lg p-3 text-xs text-txt-dim">
+                <div>榜单入口已内置在前端，不再读取 workflow_config.json。</div>
+                <div>默认起点可直接切换，扫榜只走常用榜单。</div>
+            </div>
             <select v-model="selectedRank" class="w-full bg-subtle border border-border-dim text-txt text-xs rounded-lg px-4 py-2.5 outline-none focus:border-accent cursor-pointer">
-                <option value="">（按 workflow_config.json 批量扫榜）</option>
                 <option v-for="opt in rankOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
             </select>
-            <div class="bg-subtle/30 border border-border-dim rounded-lg p-3 text-xs text-txt-dim">
-                <div>监控榜单 {{ workflowConfig?.rank_urls.length ?? 0 }} 个</div>
-                <div v-if="workflowConfig">定时任务 {{ workflowConfig.enabled ? `已开启 ${workflowConfig.schedule_time}` : '未开启' }}</div>
-            </div>
-            <button @click="triggerFullScan" :disabled="isDownloading" class="w-full bg-gradient-to-r from-accent to-orange-500 text-[var(--accent-text)] font-bold py-2.5 px-4 rounded-lg hover:opacity-90 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 text-xs shadow-sm"><span v-if="isDownloading" class="animate-spin">⏳</span><span>{{ isDownloading ? '后台扫榜中...' : '🚀 立即扫榜' }}</span></button>
             <div class="flex-1 bg-subtle rounded-xl border border-border-dim overflow-y-auto p-2 space-y-1"><div v-if="reportFiles.length === 0" class="flex items-center justify-center h-32 text-txt-dim text-xs">暂无报告</div><template v-for="file in reportFiles" :key="file"><div @click="selectReport(file)" class="px-3 py-2.5 rounded-lg cursor-pointer transition-all border flex items-center gap-3" :class="selectedReport === file ? 'bg-gradient-to-r from-accent/10 to-transparent border-l-2 border-l-accent' : 'hover:bg-hover border-l-2 border-l-transparent text-txt-dim hover:text-txt'"><span>📊</span><div class="flex-1 min-w-0"><div class="truncate font-medium text-xs">{{ formatReportName(file) }}</div><div class="text-[10px] opacity-40 truncate">{{ file }}</div></div></div></template></div>
         </div>
         <!-- 选中书籍时分栏 -->
