@@ -1,6 +1,6 @@
 # 项目背景
 
-`novel-splitter` 是一个基于 `Tauri + Vue 3 + Rust` 的桌面拆书工具。当前主线已经收敛到数据库驱动，前端只保留 `选题雷达` 和 `对标拆书` 两个入口。
+`novel-splitter` 是一个基于 `Tauri + Vue 3 + Rust` 的桌面拆书工具。当前主线已经收敛到数据库驱动，前端使用 `书库` + `拆书雷达` 两个 tab，对标拆书入口收敛到书卡上的按钮。
 
 ## 系统组成
 
@@ -11,7 +11,7 @@
 
 ## 主线流程
 
-1. 用户在 `选题雷达` 触发 `trigger_full_scan`
+1. 用户在 `拆书雷达` 触发 `trigger_full_scan`
 2. 爬虫抓榜并把小说、章节、榜单快照写入数据库
 3. `multi_agent_review` 并发调用 4 个 Agent：
    - `reader`
@@ -50,8 +50,10 @@
 
 ## 当前界面事实
 
-- `选题雷达` 负责榜单洞察、扫榜触发、报告列表
-- `对标拆书` 负责书库卡片、单书详情、三视角评估、拆书占位卡片
+- `书库` 负责书库卡片网格，每张卡片提供「🔍 对标拆书」按钮，点击进入单书详情
+- `拆书雷达` 负责榜单洞察、扫榜触发、报告列表
+- 单书详情视图独立于 tab；顶部有「← 返回书库」按钮；切 tab 时自动重置 `selectedNovel`
+- 扫榜下拉硬编码 7 个起点常用榜单（`yuepiao` / `hotsales` / `newbook` / `mvp` / `signnewbook` / `fanben` / `vipclick`），不再从 `workflow_config.json` 读 `rank_urls`
 - `consensus` 在 UI 上需要中文映射
 - 详情页和报告页都以数据库为准
 
