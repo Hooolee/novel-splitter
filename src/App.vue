@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { marked } from "marked";
-import { type NovelListRow } from "./components/NovelCard.vue";
+import { type NovelListRow, type AiReviewsBreakdown } from "./components/NovelCard.vue";
 import NovelGrid from "./components/NovelGrid.vue";
 
 type ConsensusKey = NonNullable<NovelListRow['ai_reviews']>['consensus'];
@@ -30,12 +30,6 @@ marked.setOptions({ renderer });
 // downloads go to {workspaceRoot}/downloads/
 // logs go to {workspaceRoot}/logs/
 const workspaceRoot = ref(localStorage.getItem('workspace_root') || '');
-
-// Computed paths
-const downloadsDir = computed(() => {
-    if (!workspaceRoot.value) return '';
-    return `${workspaceRoot.value}/downloads`;
-});
 
 // --- State ---
 // V2.0 流水线由 trigger_full_scan 驱动；前端只保留「+ 添加书籍」入口的轻量配置。
@@ -101,38 +95,22 @@ const isEvaluatingNovel = ref(false);
 
 const downloadLog = ref<string[]>([]);
 
-// File Tree State
-interface FileNode {
-    name: string;
-    path: string;
-    is_dir: boolean;
-    children: FileNode[];
-    expanded?: boolean; 
-}
-const treeFiles = ref<FileNode[]>([]);
-
-const selectedFile = ref<string | null>(null);
-const fileContent = ref("");
-const splitContent = ref("");
-const isSplitting = ref(false);
-
-// Metadata State
-interface NovelMetadata {
+interface RisingNovelRow {
+    id: number;
     title: string;
-    url: string;
+    platform: string;
+    rank: number;
+    rank_change: string;
     tags: string[];
-    word_count: string;
-    description: string;
-    ai_analysis?: {
-        genre: string;
-        style: string;
-        goldfinger: string;
-        opening: string;
-        highlights: string;
-    }
 }
-const currentMetadata = ref<NovelMetadata | null>(null);
 
+interface RiskTagRow {
+    tag: string;
+    avg_weight: number;
+    sample_count: number;
+}
+
+// File Tree State
 // --- Library DB cards (任务四a) ---
 const novels = ref<NovelListRow[]>([]);
 // Template helper: vue-tsc workaround for v-for type narrowing
@@ -203,7 +181,6 @@ const topFocus = computed(() => {
         .slice(0, 10);
 });
 
-
 const selectedNovelId = computed((): number | null => selectedNovel.value?.id ?? null);
 
 const consensusDistribution = computed(() => {
@@ -215,6 +192,80 @@ const consensusDistribution = computed(() => {
     }
     return dist;
 });
+
+const risingNovels = ref<RisingNovelRow[]>([]);
+const riskTags = ref<RiskTagRow[]>([]);
+
+const consensusLabelMap: Record<string, string> = Object.fromEntries(
+    CONSENSUS_OPTIONS.map(opt => [opt.value, opt.label]),
+) as Record<string, string>;
+
+function consensusLabel(value: string | null | undefined): string {
+    if (!value) return '—';
+    return consensusLabelMap[value] ?? value;
+}
+
+function normalizeTextList(value: string[] | string | null | undefined): string[] {
+    if (!value) return [];
+    if (Array.isArray(value)) {
+        return value.map(item => item.trim()).filter(Boolean);
+    }
+    const text = value.trim();
+    return text ? [text] : [];
+}
+
+function countBreakdownField(field: keyof AiReviewsBreakdown, limit: number): [string, number][] {
+    const map = new Map<string, number>();
+    for (const novel of novels.value) {
+        const raw = novel.ai_reviews?.breakdown?.[field] as string[] | string | null | undefined;
+        for (const item of normalizeTextList(raw)) {
+            map.set(item, (map.get(item) ?? 0) + 1);
+        }
+    }
+    return Array.from(map.entries())
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'zh-Hans-CN'))
+        .slice(0, limit);
+}
+
+const topGoldfingerTypes = computed(() => countBreakdownField('goldfinger_type', 8));
+const topProtagonistArchetypes = computed(() => countBreakdownField('protagonist_archetype', 6));
+
+const selectedBreakdown = computed(() => selectedNovel.value?.ai_reviews?.breakdown ?? null);
+const selectedChapterEndHookTypes = computed(() => normalizeTextList(selectedBreakdown.value?.chapter_end_hook_types));
+const selectedLearningPoints = computed(() => normalizeTextList(selectedBreakdown.value?.learning_points));
+const selectedBreakdownOverviewReady = computed(() => {
+    const breakdown = selectedBreakdown.value;
+    if (!breakdown) return false;
+    return Boolean(
+        breakdown.goldfinger_type ||
+        breakdown.protagonist_archetype ||
+        breakdown.opening_hook ||
+        selectedChapterEndHookTypes.value.length > 0
+    );
+});
+const selectedBreakdownPacingReady = computed(() => {
+    const breakdown = selectedBreakdown.value;
+    if (!breakdown) return false;
+    return Boolean(breakdown.hook_density || breakdown.pacing_notes);
+});
+const selectedBreakdownLearningReady = computed(() => {
+    if (!selectedBreakdown.value) return false;
+    return selectedLearningPoints.value.length > 0;
+});
+const selectedHookDensityBadge = computed(() => hookDensityBadge(selectedBreakdown.value?.hook_density ?? null));
+
+function hookDensityBadge(value: string | null | undefined): { label: string; cls: string } | null {
+    switch (value) {
+        case 'high':
+            return { label: '高密度', cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' };
+        case 'medium':
+            return { label: '适中', cls: 'bg-sky-500/15 text-sky-300 border-sky-500/30' };
+        case 'low':
+            return { label: '较稀疏', cls: 'bg-amber-500/15 text-amber-300 border-amber-500/30' };
+        default:
+            return null;
+    }
+}
 
 async function loadNovels() {
     novelsLoading.value = true;
@@ -234,6 +285,21 @@ async function loadNovels() {
     }
 }
 
+async function loadReportInsights() {
+    try {
+        const [rising, risks] = await Promise.all([
+            invoke<RisingNovelRow[]>('list_rising_novels', { limit: 5 }),
+            invoke<RiskTagRow[]>('list_risk_tags', { minCount: 2, limit: 8 }),
+        ]);
+        risingNovels.value = rising;
+        riskTags.value = risks;
+    } catch (e) {
+        console.error('加载报表洞察失败:', e);
+        risingNovels.value = [];
+        riskTags.value = [];
+    }
+}
+
 function toggleTag(t: string) {
     const i = tagFilter.value.indexOf(t);
     if (i >= 0) tagFilter.value.splice(i, 1);
@@ -250,10 +316,14 @@ function toggleConsensus(c: ConsensusKey) {
 
 function selectNovel(novel: NovelListRow) {
     selectedNovel.value = novel;
-    currentMetadata.value = null;
-    selectedFile.value = null;
-    fileContent.value = '';
-    splitContent.value = '';
+}
+
+function setActiveTab(tab: 'library' | 'reports') {
+    activeTab.value = tab;
+    selectedNovel.value = null;
+    if (tab === 'reports') {
+        loadReportFiles();
+    }
 }
 
 async function evaluateSelectedNovel() {
@@ -368,9 +438,6 @@ async function selectWorkspaceDir() {
 
             // 同步工作目录到后端（系统托盘/调度器使用同一路径）
             await invoke("set_workspace_root", { root: selected });
-
-            // Refresh file tree
-            await refreshTreeFiles();
         }
     } catch (e) {
         alert("选择目录失败: " + e);
@@ -426,50 +493,9 @@ onMounted(async () => {
         try { await invoke("set_workspace_root", { root: savedRoot }); } catch (e) { /* ignore */ }
     }
 
-    // Listen for AI Streaming
-    listen('ai-analysis', (event: any) => {
-        splitContent.value += event.payload.chunk;
-        // Auto scroll to bottom?
-    });
-    
-    listen('ai-analysis-status', (event: any) => {
-         const payload = event.payload;
-         if (payload.status === 'start') {
-             // splitContent.value = `[System] ${payload.message}\n\n`; // Don't wipe manual split content for auto-analysis
-         } else if (payload.status === 'error') {
-             splitContent.value += `\n[Error] ${payload.message}`;
-             isSplitting.value = false;
-         } else if (payload.status === 'done') {
-             isSplitting.value = false;
-             
-             // Check if this was a JSON analysis result
-             try {
-                 // Try to parse the last block of content
-                 // The AI might return markdown code blocks, so we need to clean it
-                 // This is a bit hacky, depending on if we are in auto-analyze mode
-                 // Ideally we should have a flag or separate event for auto-analysis
-                 // But for now, let's just trigger a store update if it looks like JSON
-             } catch (e) {
-                 // ignore
-             }
-         } else {
-             // Streaming content
-             // Only append if we are viewing the split tab OR if we are capturing for auto-analysis?
-             // Actually, for auto-analysis, we need to capture the stream separately.
-             // Simplification: We will use the same 'ai-analysis' event but we need to know if it's for auto-analysis.
-             // Since the backend doesn't support distinguish, we might see the content appearing in the "拆书结果" box.
-             // That is acceptable for now.
-         }
-    });
-
     listen('download-progress', (event: any) => {
         const payload = event.payload;
         downloadLog.value.push(`[${new Date().toLocaleTimeString()}] ${payload.message}`);
-
-        // Auto refresh tree on every minor completion or folder creation hint
-        if (payload.status === 'completed' || payload.status === 'skipped' || payload.message.includes('下载完成') || payload.message.includes('已保存')) {
-            refreshTreeFiles();
-        }
 
         if (payload.status === 'completed') {
              isDownloading.value = false;
@@ -486,7 +512,7 @@ onMounted(async () => {
         currentPhase.value = null;
         logContent.value += `[${new Date().toLocaleTimeString()}] 扫榜完成，报告已生成。\n`;
         loadReportFiles();
-        refreshTreeFiles();
+        loadReportInsights();
     });
 
     listen<ScanRunStatus>("scan-run-status", (event) => {
@@ -499,6 +525,7 @@ onMounted(async () => {
         if (payload.status === 'completed') {
             loadReportFiles();
             loadNovels();
+            loadReportInsights();
         }
     });
 
@@ -512,23 +539,18 @@ onMounted(async () => {
             `[${new Date().toLocaleTimeString()}] [Phase ${payload.phase}/${4} · ${payload.status}]${progressTag} ${payload.message}`
         );
         if (payload.phase === 2 && payload.status === 'completed') {
-            refreshTreeFiles();
             loadNovels();
+            loadReportInsights();
         }
         if (payload.phase === 4 && payload.status === 'completed') {
             loadNovels();
+            loadReportInsights();
         }
     });
 
     // Strategy 2: Periodic refresh while downloading (every 2s) to catch new folders
-    setInterval(() => {
-        if (isDownloading.value) {
-            refreshTreeFiles();
-        }
-    }, 2000);
-    
-    refreshTreeFiles();
     loadReportFiles();
+    loadReportInsights();
     loadWorkflowConfig();
     loadNovels();
 });
@@ -546,7 +568,6 @@ async function submitAddBook() {
 
     isDownloading.value = true;
     downloadLog.value = [];
-    currentMetadata.value = null;
     showAddBookModal.value = false;
 
     try {
@@ -557,80 +578,6 @@ async function submitAddBook() {
     } catch (e) {
         alert("Error: " + e);
         isDownloading.value = false;
-    }
-}
-
-async function refreshTreeFiles() {
-    if (!downloadsDir.value) {
-        treeFiles.value = [];
-        return;
-    }
-    try {
-        const res = await invoke("get_file_tree", { dirName: downloadsDir.value });
-        const nodes = res as FileNode[];
-        // Filter out info.json from top level (unlikely) or ensure children don't show it?
-        // UI v-for will filter it easily.
-        nodes.forEach(n => {
-            if (n.is_dir) n.expanded = false; 
-        });
-        treeFiles.value = nodes;
-    } catch (e) {
-        console.error(e);
-    }
-}
-
-async function loadNovelMetadata(path: string) {
-    try {
-        // Assume info.json is directly inside the novel folder
-        // The path arg is relative to base dir, e.g. "NovelName"
-        // So we want "NovelName/info.json"
-        
-        // Windows/Mac path separator issue? get_file_content handles path joining.
-        // We construct the relative path string manually.
-        const metaPath = path.endsWith('/') ? `${path}info.json` : `${path}/info.json`;
-        
-        const content = await invoke("get_file_content", { 
-            dir: downloadsDir.value, 
-            filename: metaPath
-        });
-        
-        if (content) {
-            currentMetadata.value = JSON.parse(content as string);
-            fileContent.value = ""; // Clear text content to show metadata view
-        }
-    } catch (e) {
-        // It's okay if metadata doesn't exist
-        console.log("No metadata found for", path);
-        currentMetadata.value = null;
-    }
-}
-
-async function startSplit() {
-    if (!fileContent.value) return;
-    if (!aiConfig.value.apiKey) {
-        showSettings.value = true;
-        alert("请先配置 AI API Key");
-        return;
-    }
-
-    isSplitting.value = true;
-    splitContent.value = "准备连接 AI...\n";
-    
-    // Auto-save settings just in case
-    saveSettings(); 
-
-    try {
-        await invoke("start_ai_analysis", {
-            apiBase: aiConfig.value.apiBase,
-            apiKey: aiConfig.value.apiKey,
-            model: aiConfig.value.model,
-            prompt: aiConfig.value.promptChapter,
-            content: fileContent.value.substring(0, 3000), // Limit context window for safety
-            responseJson: false
-        });
-    } catch (e) {
-        splitContent.value = "启动失败: " + e;
-        isSplitting.value = false;
     }
 }
 
@@ -655,197 +602,6 @@ async function fetchModels() {
         availableModels.value = [];
     } finally {
         isFetchingModels.value = false;
-    }
-}
-
-function exportResult() {
-    if (!splitContent.value) {
-        alert("没有可导出的内容");
-        return;
-    }
-    
-    if (!selectedFile.value) {
-        alert("请先选择一个章节");
-        return;
-    }
-    
-    // selectedFile format: "NovelName/01.txt"
-    // Extract novel name and chapter index
-    const pathParts = selectedFile.value.split('/');
-    if (pathParts.length < 2) {
-        alert("无法识别文件路径");
-        return;
-    }
-    
-    const novelName = pathParts[0];
-    const fileName = pathParts[pathParts.length - 1];
-    
-    // Extract chapter index from filename (e.g., "01.txt" -> 1)
-    const match = fileName.match(/(\d+)\.txt$/);
-    if (!match) {
-        alert("无法识别章节编号");
-        return;
-    }
-    
-    const chapterIndex = parseInt(match[1]);
-
-    invoke("export_chapter", {
-        novelTitle: novelName,
-        chapterIndex: chapterIndex,
-        content: splitContent.value,
-        workspaceRoot: workspaceRoot.value || null
-    }).then((path) => {
-        alert(`导出成功！\n文件路径: ${path}`);
-    }).catch((e) => {
-        alert(`导出失败: ${e}`);
-    });
-}
-
-async function autoAnalyze(novelName: string) {
-    if (!aiConfig.value.apiKey) {
-        downloadLog.value.push(`[System] Skipped analysis for ${novelName}: No API Key`);
-        return;
-    }
-    
-    downloadLog.value.push(`[System] Starting analysis for ${novelName}...`);
-
-    try {
-        // 1. Read first N chapters (configurable)
-        const chaptersToRead = aiConfig.value.analysisChapters || 5;
-        let fullContent = "";
-        for (let i = 1; i <= chaptersToRead; i++) {
-            const fileName = `${String(i).padStart(2, '0')}.txt`;
-            const filePath = `${novelName}/${fileName}`; // Relative path
-            try {
-                const content = await invoke("get_file_content", {
-                    dir: downloadsDir.value,
-                    filename: filePath
-                });
-                fullContent += `\n\n--- 第 ${i} 章 ---\n\n${content}`;
-            } catch (e) {
-                // Ignore missing chapters (maybe less than configured)
-            }
-        }
-
-        if (!fullContent.trim()) {
-            downloadLog.value.push(`[System] Analysis failed: No content read`);
-            return;
-        }
-        
-        // 2. Prepare Prompt
-        // 2. Prompt：用户可自定义总结提示词，空则回退后端默认
-        const prompt: string = (aiConfig.value.promptSummary && aiConfig.value.promptSummary.trim())
-            ? aiConfig.value.promptSummary
-            : await invoke("get_auto_analysis_prompt");
-
-        // 3. Call AI
-        // We use a temporary way to capture the output since the backend streams to a global event
-        // We will override the splitContent to show the user what is happening
-        splitContent.value = `正在自动分析《${novelName}》...\n\n`;
-        isSplitting.value = true;
-        
-        // We need to listen to the specific stream for this analysis
-        // But since the global listener appends to splitContent, we can just watch splitContent or wait for 'done'
-        // Ideally, we should refactor backend to return a RequestID and filter events.
-        // For this prototype, we will wait for the 'ai-analysis-status' done event.
-        
-        let capturedOutput = "";
-        const unlisten = await listen('ai-analysis', (event: any) => {
-             capturedOutput += event.payload.chunk;
-        });
-        
-        // Helper to wait for done
-        const waitForDone = new Promise<void>((resolve, reject) => {
-             const unlistenStatus = listen('ai-analysis-status', (event: any) => {
-                 if (event.payload.status === 'done') {
-                     unlistenStatus.then(f => f());
-                     resolve();
-                 } else if (event.payload.status === 'error') {
-                     unlistenStatus.then(f => f());
-                     reject(event.payload.message);
-                 }
-             });
-        });
-        
-        await invoke("start_ai_analysis", {
-            apiBase: aiConfig.value.apiBase,
-            apiKey: aiConfig.value.apiKey,
-            model: aiConfig.value.model,
-            prompt: prompt,
-            content: fullContent.substring(0, 15000), // Limit context
-            responseJson: false // 禁用原生 json_object，避免某些代理层因为兼容问题直接返回空流
-        });
-        
-        await waitForDone;
-        unlisten(); // Stop listening
-        
-        // 4. Parse JSON
-        let cleanedOutput = capturedOutput;
-        // 移除 <think> 标签及其内容 (适配 deepseek-r1 等思考模型)
-        cleanedOutput = cleanedOutput.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-
-        let jsonStr = cleanedOutput;
-        // 尝试从 markdown 代码块中提取
-        const jsonMatch = cleanedOutput.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-        if (jsonMatch) {
-            jsonStr = jsonMatch[1];
-        }
-        
-        // 更稳健的提取，避免 AI 返回额外文案导致解析失败
-        const extractJson = (raw: string) => {
-            try {
-                return JSON.parse(raw);
-            } catch (e1) {
-                try {
-                    // 尝试寻找最外层的 {}
-                    const firstBrace = raw.indexOf('{');
-                    const lastBrace = raw.lastIndexOf('}');
-                    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-                        const inner = raw.substring(firstBrace, lastBrace + 1);
-                        return JSON.parse(inner);
-                    }
-                } catch (e2) {
-                    console.error("Secondary JSON parse failed:", e2);
-                }
-                console.error("Raw string that failed to parse:", raw);
-                throw new Error("No valid JSON found in response.\nRaw Output:\n" + raw.substring(0, 2000));
-            }
-        };
-
-        try {
-            const analysis = extractJson(jsonStr);
-            console.log("Analysis result:", analysis);
-            
-            // 5. Save to info.json via backend
-            try {
-                await invoke("update_novel_metadata", {
-                    dirName: downloadsDir.value,
-                    novelName: novelName,
-                    metadata: { ai_analysis: analysis }
-                });
-                downloadLog.value.push(`[System] Analysis saved for ${novelName}`);
-            } catch (saveErr: any) {
-                console.error("Failed to save analysis:", saveErr);
-                downloadLog.value.push(`[System] Analysis save failed: ${saveErr}`);
-                return;
-            }
-            
-            // 6. Refresh UI if we are looking at this novel
-            if (currentMetadata.value && currentMetadata.value.title === novelName) {
-                loadNovelMetadata(selectedFile.value || novelName); // Refresh
-            }
-            
-        } catch (e: any) {
-            console.error("Failed to parse AI response:", e);
-            splitContent.value = "❌ 解析失败！AI 返回了不符合预期的格式。\n\n【原始返回内容截取】\n" + (e.message || e);
-            downloadLog.value.push(`[System] Analysis failed: JSON parse error`);
-        }
-        
-    } catch (e) {
-        console.error("Auto analyze error:", e);
-        downloadLog.value.push(`[System] Analysis error: ${e}`);
-    } finally {
-        isSplitting.value = false;
     }
 }
 
@@ -890,7 +646,7 @@ async function triggerFullScan() {
     }
     isDownloading.value = true;
     logContent.value += `[${new Date().toLocaleTimeString()}] 已触发后台全量扫榜任务...\n`;
-    activeTab.value = 'reports'; // 切换到报告页
+    setActiveTab('reports');
     
     let targetUrl = null;
     let platform = null;
@@ -910,9 +666,6 @@ async function triggerFullScan() {
 
 async function selectReport(filename: string) {
     selectedReport.value = filename;
-    currentMetadata.value = null;
-    fileContent.value = '';
-    splitContent.value = '';
     try {
         reportContent.value = await invoke("read_report", {
             workspaceRoot: workspaceRoot.value,
@@ -943,49 +696,42 @@ function formatReportName(filename: string): string {
 </script>
 
 <template>
-  <div class="h-screen flex text-txt bg-bg font-sans overflow-hidden">
-    
-    <!-- Sidebar -->
-    <!-- Sidebar -->
-    <!-- Sidebar -->
-    <div class="w-72 bg-sidebar border-r border-border-dim flex flex-col p-5 flex-shrink-0 transition-all duration-300">
-        <!-- Header -->
-        <div class="flex items-center gap-3 mb-8 px-1">
-            <div class="w-8 h-8 rounded-xl bg-gradient-to-br from-red-500 to-orange-600 flex items-center justify-center shadow-lg shadow-red-900/20">
+  <div class="h-screen flex flex-col text-txt bg-bg font-sans overflow-hidden">
+    <header class="h-16 bg-sidebar border-b border-border-dim flex items-center gap-4 px-4 flex-shrink-0">
+        <div class="flex items-center gap-3 min-w-0">
+            <div class="w-8 h-8 rounded-xl bg-gradient-to-br from-red-500 to-orange-600 flex items-center justify-center shadow-lg shadow-red-900/20 flex-shrink-0">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5 text-white">
                     <path d="M11.7 2.805a.75.75 0 0 1 .6 0A16.036 16.036 0 0 0 17.686 5.5c1.657.492 2.766 1.763 3.394 3.033.453.916.71 2.016.92 3.149.23 1.238.23 2.536.002 3.791-.191 1.054-.537 2.062-1.025 2.923-.526.927-1.398 1.956-2.825 2.668a1.503 1.503 0 0 1-1.304 0c-1.427-.712-2.299-1.741-2.825-2.668-.488-.861-.834-1.869-1.025-2.923-.228-1.255-.228-2.553.002-3.791.21-1.133.467-2.233.92-3.149.628-1.27 1.737-2.54 3.394-3.033a16.033 16.033 0 0 0 5.386 2.695.75.75 0 0 1 .458 1.06l-.99.99-.028.028a3.155 3.155 0 0 0-.67 1.264c-.055.234-.265.378-.49.337a.66.66 0 0 1-.502-.45c-.179-.646-.502-1.246-.938-1.758a.74.74 0 0 1 .09-1.03l.97-.88a14.522 14.522 0 0 1-4.225-2.004Z" />
                 </svg>
             </div>
-            <div>
+            <div class="min-w-0">
                 <h1 class="font-bold text-base text-txt tracking-tight leading-tight">拆书工具 <span class="text-accent text-xs align-top opacity-80 font-normal">Pro</span></h1>
                 <p class="text-[10px] text-txt-dim font-medium tracking-wide uppercase">Novel Splitter</p>
             </div>
         </div>
-        
-        <!-- Tab Switcher -->
-        <div class="bg-subtle p-1 rounded-lg flex mb-6 relative border border-border-dim">
-            <div class="absolute top-1 bottom-1 rounded-md bg-active border border-border-dim shadow-sm transition-all duration-300 ease-out" :style="{ left: activeTab === 'library' ? '4px' : 'calc(50% + 1px)', width: 'calc(50% - 5px)' }"></div>
-            <button @click="activeTab = 'library'" class="flex-1 relative z-10 text-xs font-medium py-1.5 text-center transition-colors duration-200" :class="activeTab === 'library' ? 'text-txt' : 'text-txt-dim hover:text-txt'">📚 对标拆书</button>
-            <button @click="activeTab = 'reports'; loadReportFiles()" class="flex-1 relative z-10 text-xs font-medium py-1.5 text-center transition-colors duration-200" :class="activeTab === 'reports' ? 'text-txt' : 'text-txt-dim hover:text-txt'">📊 选题雷达</button>
-        </div>
 
-        <div class="mt-auto pt-4 border-t border-border-dim flex justify-between items-center group/settings">
-            <span class="text-[10px] text-txt-dim group-hover/settings:text-txt transition-colors">SETTINGS</span>
-            <div class="flex gap-1">
-                 <button @click="showSettings = true" class="w-7 h-7 flex items-center justify-center rounded-md hover:bg-subtle text-txt-dim hover:text-txt transition-all" title="API 设置">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 0 1 0 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 0 1 0-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281Z" />
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
-                    </svg>
-                </button>
-                <button @click="cycleTheme" class="w-7 h-7 flex items-center justify-center rounded-md hover:bg-subtle text-txt-dim hover:text-txt transition-all" title="切换皮肤">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M9.53 16.122a3 3 0 0 0-5.78 1.128 2.25 2.25 0 0 1-2.4 2.245 4.5 4.5 0 0 0 8.4-2.245c0-.399-.078-.78-.22-1.128Zm0 0a15.998 15.998 0 0 0 3.388-1.62m-5.043-.025a15.994 15.994 0 0 1 1.622-3.395m3.42 3.418a15.995 15.995 0 0 0 4.764-4.648l3.876-5.814a1.151 1.151 0 0 0-1.597-1.597L14.146 6.32a16.03 16.03 0 0 0-4.649 4.763m0 0a2.18 2.18 0 0 0-1.655.895" />
-                    </svg>
-                </button>
+        <div class="flex-1 flex justify-center">
+            <div class="bg-subtle p-1 rounded-lg flex relative border border-border-dim min-w-[240px] max-w-md w-full">
+                <div class="absolute top-1 bottom-1 rounded-md bg-active border border-border-dim shadow-sm transition-all duration-300 ease-out" :style="{ left: activeTab === 'library' ? '4px' : 'calc(50% + 1px)', width: 'calc(50% - 5px)' }"></div>
+                <button @click="setActiveTab('library')" class="flex-1 relative z-10 text-xs font-medium py-1.5 text-center transition-colors duration-200" :class="activeTab === 'library' ? 'text-txt' : 'text-txt-dim hover:text-txt'">📚 书库</button>
+                <button @click="setActiveTab('reports')" class="flex-1 relative z-10 text-xs font-medium py-1.5 text-center transition-colors duration-200" :class="activeTab === 'reports' ? 'text-txt' : 'text-txt-dim hover:text-txt'">📊 拆书雷达</button>
             </div>
         </div>
-    </div>
+
+        <div class="flex items-center gap-1 flex-shrink-0">
+            <button @click="showSettings = true" class="w-7 h-7 flex items-center justify-center rounded-md hover:bg-subtle text-txt-dim hover:text-txt transition-all" title="API 设置">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 0 1 0 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 0 1 0-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281Z" />
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+                </svg>
+            </button>
+            <button @click="cycleTheme" class="w-7 h-7 flex items-center justify-center rounded-md hover:bg-subtle text-txt-dim hover:text-txt transition-all" title="切换皮肤">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9.53 16.122a3 3 0 0 0-5.78 1.128 2.25 2.25 0 0 1-2.4 2.245 4.5 4.5 0 0 0 8.4-2.245c0-.399-.078-.78-.22-1.128Zm0 0a15.998 15.998 0 0 0 3.388-1.62m-5.043-.025a15.994 15.994 0 0 1 1.622-3.395m3.42 3.418a15.995 15.995 0 0 0 4.764-4.648l3.876-5.814a1.151 1.151 0 0 0-1.597-1.597L14.146 6.32a16.03 16.03 0 0 0-4.649 4.763m0 0a2.18 2.18 0 0 0-1.655.895" />
+                </svg>
+            </button>
+        </div>
+    </header>
 
     <!-- Main Content -->
     <div class="flex-1 flex flex-col p-4 gap-4 overflow-hidden">
@@ -1039,33 +785,74 @@ function formatReportName(filename: string): string {
             <div v-if="allTags.length > 0" class="flex flex-wrap gap-1 flex-shrink-0">
                 <button v-for="t in allTags.slice(0, 30)" :key="t" @click="toggleTag(t)" class="text-xs px-1.5 py-0.5 rounded border transition-all" :class="tagFilter.includes(t) ? 'bg-accent/20 border-accent text-accent' : 'border-border-dim text-txt-dim hover:text-txt'">{{ t }}</button>
             </div>
-            <div class="bg-subtle/30 border border-border-dim rounded-lg p-4 flex-shrink-0">
-                <div class="flex flex-wrap items-start gap-x-8 gap-y-3">
-                    <div v-if="topTags.length > 0">
-                        <div class="text-xs text-txt-dim mb-1.5 font-medium">热门题材</div>
-                        <div class="flex flex-wrap gap-1">
-                            <span v-for="[tag, w] in topTags.slice(0, 10)" :key="tag" class="px-2 py-0.5 rounded text-xs border transition-all" :class="topTags[0][0] === tag ? 'bg-accent/10 border-accent/30 text-accent' : 'border-border-dim text-txt-dim'">{{ tag }} <span class="font-mono">{{ w > 0 ? '+' : '' }}{{ w }}</span></span>
-                        </div>
-                    </div>
-                    <div v-if="topFocus.length > 0">
-                        <div class="text-xs text-txt-dim mb-1.5 font-medium">关注点</div>
-                        <div class="flex flex-wrap gap-1">
-                            <span v-for="[kw, cnt] in topFocus.slice(0, 8)" :key="kw" class="px-2 py-0.5 rounded text-xs border border-border-dim text-txt-dim">{{ kw }} <span class="font-mono opacity-50">{{ cnt }}</span></span>
-                        </div>
-                    </div>
-                    <div>
-                        <div class="text-xs text-txt-dim mb-1.5 font-medium">共识</div>
-                        <div class="flex flex-wrap gap-1">
-                            <span v-for="[c, label, cls] in [['all_yes','看好','bg-green-500/10 text-green-300 border-green-500/30'],['majority_yes','多看好','bg-emerald-500/10 text-emerald-300 border-emerald-500/30'],['divergent','分歧','bg-amber-500/10 text-amber-300 border-amber-500/30'],['majority_no','多不看好','bg-rose-500/10 text-rose-300 border-rose-500/30'],['all_no','不看好','bg-red-500/10 text-red-300 border-red-500/30']] as const" :key="c" class="px-2 py-0.5 rounded text-xs border" :class="cls">{{ label }} {{ consensusDistribution[c] }}</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
             <NovelGrid :novels="novels" :novels-loading="novelsLoading" :selected-novel-id="selectedNovelId" @select="selectNovel" />
         </div>
         <!-- 报告无选中 -->
         <div v-else-if="activeTab === 'reports' && !selectedReport" class="flex flex-col gap-4 overflow-y-auto pb-6">
-            <div class="flex items-center justify-between"><span class="text-xs font-bold text-txt-dim uppercase tracking-wider">选题雷达</span><button @click="loadReportFiles" class="text-txt-dim hover:text-txt p-1 rounded hover:bg-subtle">🔄</button></div>
+            <div class="bg-subtle/30 border border-border-dim rounded-lg p-4 flex-shrink-0">
+                <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                    <div class="bg-card/70 rounded-lg border border-border-dim p-3">
+                        <div class="text-xs text-txt-dim mb-2 font-medium">热门题材</div>
+                        <div class="flex flex-wrap gap-1">
+                            <span v-for="[tag, w] in topTags.slice(0, 10)" :key="tag" class="px-2 py-0.5 rounded text-xs border transition-all" :class="topTags[0]?.[0] === tag ? 'bg-accent/10 border-accent/30 text-accent' : 'border-border-dim text-txt-dim'">{{ tag }} <span class="font-mono">{{ w > 0 ? '+' : '' }}{{ w }}</span></span>
+                        </div>
+                    </div>
+                    <div class="bg-card/70 rounded-lg border border-border-dim p-3">
+                        <div class="text-xs text-txt-dim mb-2 font-medium">关注点</div>
+                        <div class="flex flex-wrap gap-1">
+                            <span v-for="[kw, cnt] in topFocus.slice(0, 8)" :key="kw" class="px-2 py-0.5 rounded text-xs border border-border-dim text-txt-dim">{{ kw }} <span class="font-mono opacity-50">{{ cnt }}</span></span>
+                        </div>
+                    </div>
+                    <div class="bg-card/70 rounded-lg border border-border-dim p-3">
+                        <div class="text-xs text-txt-dim mb-2 font-medium">高频金手指</div>
+                        <div v-if="topGoldfingerTypes.length > 0" class="flex flex-wrap gap-1">
+                            <span v-for="[item, cnt] in topGoldfingerTypes" :key="item" class="px-2 py-0.5 rounded text-xs border border-border-dim text-txt-dim">{{ item }} <span class="font-mono opacity-50">{{ cnt }}</span></span>
+                        </div>
+                        <div v-else class="text-xs text-txt-dim">等待评估积累</div>
+                    </div>
+                    <div class="bg-card/70 rounded-lg border border-border-dim p-3">
+                        <div class="text-xs text-txt-dim mb-2 font-medium">主角人设</div>
+                        <div v-if="topProtagonistArchetypes.length > 0" class="flex flex-wrap gap-1">
+                            <span v-for="[item, cnt] in topProtagonistArchetypes" :key="item" class="px-2 py-0.5 rounded text-xs border border-border-dim text-txt-dim">{{ item }} <span class="font-mono opacity-50">{{ cnt }}</span></span>
+                        </div>
+                        <div v-else class="text-xs text-txt-dim">等待评估积累</div>
+                    </div>
+                    <div class="bg-card/70 rounded-lg border border-border-dim p-3">
+                        <div class="text-xs text-txt-dim mb-2 font-medium">共识</div>
+                        <div class="flex flex-wrap gap-1">
+                            <span v-for="[c, label, cls] in [['all_yes','看好','bg-green-500/10 text-green-300 border-green-500/30'],['majority_yes','多看好','bg-emerald-500/10 text-emerald-300 border-emerald-500/30'],['divergent','分歧','bg-amber-500/10 text-amber-300 border-amber-500/30'],['majority_no','多不看好','bg-rose-500/10 text-rose-300 border-rose-500/30'],['all_no','不看好','bg-red-500/10 text-red-300 border-red-500/30']] as const" :key="c" class="px-2 py-0.5 rounded text-xs border" :class="cls">{{ label }} {{ consensusDistribution[c] }}</span>
+                        </div>
+                    </div>
+                    <div class="bg-card/70 rounded-lg border border-border-dim p-3">
+                        <div class="text-xs text-txt-dim mb-2 font-medium">黑马</div>
+                        <div v-if="risingNovels.length > 0" class="space-y-1.5">
+                            <div v-for="item in risingNovels" :key="item.id" class="flex items-start justify-between gap-2 text-xs">
+                                <div class="min-w-0">
+                                    <div class="text-txt truncate">{{ item.title }}</div>
+                                    <div class="text-[11px] text-txt-dim">{{ item.platform }} · #{{ item.rank }}</div>
+                                </div>
+                                <div class="text-accent font-mono whitespace-nowrap">
+                                    {{ item.rank_change.startsWith('-') ? item.rank_change : `+${item.rank_change.replace(/^\+/, '')}` }}
+                                </div>
+                            </div>
+                        </div>
+                        <div v-else class="text-xs text-txt-dim">暂无最新黑马</div>
+                    </div>
+                    <div class="bg-card/70 rounded-lg border border-border-dim p-3">
+                        <div class="text-xs text-txt-dim mb-2 font-medium">风险赛道</div>
+                        <div v-if="riskTags.length > 0" class="space-y-1.5">
+                            <div v-for="item in riskTags" :key="item.tag" class="flex items-start justify-between gap-2 text-xs">
+                                <div class="min-w-0">
+                                    <div class="text-txt truncate">{{ item.tag }}</div>
+                                    <div class="text-[11px] text-txt-dim">样本 {{ item.sample_count }} 个</div>
+                                </div>
+                                <div class="text-rose-300 font-mono whitespace-nowrap">{{ item.avg_weight.toFixed(1) }}</div>
+                            </div>
+                        </div>
+                        <div v-else class="text-xs text-txt-dim">暂无负向标签</div>
+                    </div>
+                </div>
+            </div>
             <select v-model="selectedRank" class="w-full bg-subtle border border-border-dim text-txt text-xs rounded-lg px-4 py-2.5 outline-none focus:border-accent cursor-pointer">
                 <option value="">（按 workflow_config.json 批量扫榜）</option>
                 <option v-for="opt in rankOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
@@ -1079,11 +866,11 @@ function formatReportName(filename: string): string {
         </div>
         <!-- 选中书籍时分栏 -->
         <div v-else class="flex-1 grid grid-cols-2 gap-4 min-h-0">
-            <!-- Left: Original Content / Metadata View -->
+            <!-- Left: DB Detail View -->
             <div class="bg-card rounded-lg border border-border flex flex-col overflow-hidden">
                 <div class="bg-white/5 px-4 py-2 border-b border-border flex justify-between items-center text-sm font-bold">
-                    <span>📖 原文预览</span>
-                    <span class="font-normal text-gray-500 text-xs">{{ selectedFile || '请在左侧选择' }}</span>
+                    <span>📖 单书详情</span>
+                    <span class="font-normal text-gray-500 text-xs">数据库详情</span>
                 </div>
                 
                 <!-- V2 Novel Detail Panel (任务四a) -->
@@ -1112,7 +899,7 @@ function formatReportName(filename: string): string {
                     <div v-if="selectedNovel.ai_reviews" class="space-y-4">
                         <div class="bg-subtle p-4 rounded-lg border border-border-dim">
                             <div class="text-xs text-accent mb-2 uppercase tracking-wider font-bold">🎯 拆书判断</div>
-                            <div class="text-sm">{{ selectedNovel.ai_reviews.consensus ?? '—' }}</div>
+                            <div class="text-sm">{{ consensusLabel(selectedNovel.ai_reviews.consensus) }}</div>
                             <div v-if="selectedNovel.ai_reviews.meta?.input_chapters" class="text-[11px] text-txt-dim mt-2">
                                 基于前 {{ selectedNovel.ai_reviews.meta.input_chapters }} 章样本
                             </div>
@@ -1142,66 +929,97 @@ function formatReportName(filename: string): string {
                         <div class="text-xs text-txt-dim">🤖 该书尚未评估</div>
                         <div class="text-[10px] text-txt-dim opacity-60 mt-1">下次扫榜或手动重跑后会自动生成</div>
                     </div>
-                </div>
-
-                <!-- Metadata Card View (Enhanced) -->
-                 <div v-else-if="currentMetadata" class="flex-1 p-6 overflow-y-auto">
-                     <div class="text-center mb-6">
-                         <div class="text-5xl mb-3">📚</div>
-                         <h2 class="text-xl font-bold text-accent mb-1">{{ currentMetadata.title }}</h2>
-                         <div class="text-xs text-txt-dim">{{ currentMetadata.word_count }}</div>
-                     </div>
-                     
-                     <div class="flex flex-wrap gap-1.5 justify-center mb-5">
-                         <span v-for="tag in currentMetadata.tags" :key="tag" class="px-2 py-0.5 bg-subtle border border-border-dim rounded text-[11px] text-txt-dim">{{ tag }}</span>
-                     </div>
-
-                     <!-- AI 操作按钮组 -->
-                     <div class="flex gap-2 mb-5">
-                         <button @click="autoAnalyze(currentMetadata.title)" :disabled="isSplitting || !aiConfig.apiKey" class="flex-1 py-2 text-xs rounded-lg border border-accent/30 text-accent hover:bg-accent/10 transition-all disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-1.5">
-                             <span>🔍</span> 商业分析
-                         </button>
-                         <button @click="() => { if(selectedFile) startSplit(); }" :disabled="!selectedFile || isSplitting || !aiConfig.apiKey" class="flex-1 py-2 text-xs rounded-lg border border-blue-400/30 text-blue-400 hover:bg-blue-400/10 transition-all disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-1.5">
-                             <span>📖</span> 深度拆解
-                         </button>
-                     </div>
-                     
-                     <div class="bg-subtle p-4 rounded-lg text-left w-full border border-border-dim">
-                         <div class="text-xs text-txt-dim mb-2 uppercase tracking-wider">简介</div>
-                         <p class="text-sm leading-relaxed text-txt whitespace-pre-wrap">{{ currentMetadata.description }}</p>
-
-                         <!-- AI Analysis Section -->
-                         <div v-if="currentMetadata.ai_analysis" class="mt-5 pt-5 border-t border-border-dim">
-                            <div class="text-xs text-accent mb-3 uppercase tracking-wider font-bold flex items-center gap-1">
-                                <span>🤖 AI 深度分析</span>
-                            </div>
-                            <div class="space-y-2.5 text-xs">
-                                <div class="grid grid-cols-[60px_1fr] gap-2"><span class="text-txt-dim">题材</span><span class="text-txt font-medium">{{ currentMetadata.ai_analysis.genre }}</span></div>
-                                <div class="grid grid-cols-[60px_1fr] gap-2"><span class="text-txt-dim">风格</span><span class="text-txt font-medium">{{ currentMetadata.ai_analysis.style }}</span></div>
-                                <div class="grid grid-cols-[60px_1fr] gap-2"><span class="text-txt-dim">金手指</span><span class="text-txt font-medium">{{ currentMetadata.ai_analysis.goldfinger }}</span></div>
-                                <div class="space-y-1"><span class="text-txt-dim block">故事开头</span><p class="text-txt leading-relaxed opacity-90">{{ currentMetadata.ai_analysis.opening }}</p></div>
-                                <div class="space-y-1"><span class="text-txt-dim block">核心看点</span><p class="text-txt leading-relaxed opacity-90">{{ currentMetadata.ai_analysis.highlights }}</p></div>
-                            </div>
-                         </div>
-                     </div>
-                 </div>
-
-                <!-- Normal File Content -->
-                <div v-else class="flex-1 p-4 overflow-y-auto whitespace-pre-wrap leading-relaxed text-sm font-serif">
-                    {{ fileContent || '暂无内容...' }}
+                    <div class="space-y-4 mt-4">
+                        <div class="bg-subtle p-4 rounded-lg border border-border-dim">
+                            <div class="text-xs text-accent mb-2 uppercase tracking-wider font-bold">📄 拆书提要</div>
+                            <template v-if="selectedBreakdownOverviewReady && selectedBreakdown">
+                                <div class="space-y-3">
+                                    <div class="grid grid-cols-[88px_1fr] gap-2 text-sm">
+                                        <span class="text-txt-dim">金手指</span>
+                                        <span class="text-txt">{{ selectedBreakdown.goldfinger_type || '—' }}</span>
+                                        <span class="text-txt-dim">主角人设</span>
+                                        <span class="text-txt">{{ selectedBreakdown.protagonist_archetype || '—' }}</span>
+                                        <span class="text-txt-dim">开篇钩子</span>
+                                        <span class="text-txt leading-relaxed">{{ selectedBreakdown.opening_hook || '—' }}</span>
+                                    </div>
+                                    <div v-if="selectedChapterEndHookTypes.length > 0" class="flex flex-wrap gap-1.5">
+                                        <span v-for="item in selectedChapterEndHookTypes" :key="item" class="px-2 py-0.5 rounded-full text-[11px] border border-border-dim bg-bg text-txt-dim">{{ item }}</span>
+                                    </div>
+                                </div>
+                            </template>
+                            <p v-else class="text-sm text-txt leading-relaxed">AI 评估扩展中，下次重新评估时会生成。</p>
+                        </div>
+                        <div class="bg-subtle p-4 rounded-lg border border-border-dim">
+                            <div class="text-xs text-accent mb-2 uppercase tracking-wider font-bold">⏱️ 章节节奏</div>
+                            <template v-if="selectedBreakdownPacingReady && selectedBreakdown">
+                                <div class="space-y-3">
+                                    <span
+                                        v-if="selectedHookDensityBadge"
+                                        class="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] border"
+                                        :class="selectedHookDensityBadge.cls"
+                                    >
+                                        {{ selectedHookDensityBadge.label }}
+                                    </span>
+                                    <p class="text-sm text-txt leading-relaxed">{{ selectedBreakdown.pacing_notes || '—' }}</p>
+                                </div>
+                            </template>
+                            <p v-else class="text-sm text-txt leading-relaxed">AI 评估扩展中，下次重新评估时会生成。</p>
+                        </div>
+                        <div class="bg-subtle p-4 rounded-lg border border-border-dim">
+                            <div class="text-xs text-accent mb-2 uppercase tracking-wider font-bold">✍️ 写法可借鉴点</div>
+                            <template v-if="selectedBreakdownLearningReady">
+                                <ul class="space-y-2 text-sm text-txt leading-relaxed list-disc list-inside">
+                                    <li v-for="point in selectedLearningPoints" :key="point">{{ point }}</li>
+                                </ul>
+                            </template>
+                            <p v-else class="text-sm text-txt leading-relaxed">AI 评估扩展中，下次重新评估时会生成。</p>
+                        </div>
+                    </div>
                 </div>
             </div>
 
-            <!-- Right: Analysis Result -->
+            <!-- Right: DB Summary -->
             <div class="bg-card rounded-lg border border-border flex flex-col overflow-hidden">
                 <div class="bg-white/5 px-4 py-2 border-b border-border flex justify-between items-center text-sm font-bold">
-                    <span>🤖 拆书/分析结果</span>
-                    <button @click="exportResult" class="text-accent text-xs border border-accent rounded px-2 py-0.5 hover:bg-accent hover:text-bg transition-colors">
-                        📤 导出结果
-                    </button>
+                    <span>🤖 三视角评估摘要</span>
+                    <span class="text-[11px] text-txt-dim">作者视角</span>
                 </div>
-                <div class="flex-1 p-4 overflow-y-auto whitespace-pre-wrap font-mono text-sm text-blue-300">
-                    {{ splitContent || '等待分析...' }}
+                <div class="flex-1 p-4 overflow-y-auto">
+                    <div v-if="selectedNovel" class="bg-subtle p-4 rounded-lg border border-border-dim h-full flex flex-col justify-between">
+                        <div>
+                            <div class="text-xs text-accent mb-2 uppercase tracking-wider font-bold">📘 本次评估概览</div>
+                            <div class="grid grid-cols-[72px_1fr] gap-2 text-xs">
+                                <span class="text-txt-dim">书名</span>
+                                <span class="text-txt">{{ selectedNovel.title }}</span>
+                                <span class="text-txt-dim">平台</span>
+                                <span class="text-txt">{{ selectedNovel.platform }}</span>
+                                <span class="text-txt-dim">最新排名</span>
+                                <span class="text-txt">{{ selectedNovel.latest_rank !== null ? `#${selectedNovel.latest_rank}` : '—' }}</span>
+                                <span class="text-txt-dim">上榜次数</span>
+                                <span class="text-txt">{{ selectedNovel.scan_count }} 次</span>
+                            </div>
+                            <div v-if="selectedNovel.ai_reviews" class="mt-4 space-y-2 text-xs">
+                                <div class="grid grid-cols-[72px_1fr] gap-2">
+                                    <span class="text-txt-dim">评估模型</span>
+                                    <span class="text-txt">{{ selectedNovel.ai_reviews.meta?.model ?? '—' }}</span>
+                                </div>
+                                <div class="grid grid-cols-[72px_1fr] gap-2">
+                                    <span class="text-txt-dim">样本章节</span>
+                                    <span class="text-txt">{{ selectedNovel.ai_reviews.meta?.input_chapters ?? '—' }} 章</span>
+                                </div>
+                                <div class="grid grid-cols-[72px_1fr] gap-2">
+                                    <span class="text-txt-dim">综合判断</span>
+                                    <span class="text-txt">{{ consensusLabel(selectedNovel.ai_reviews.consensus) }}</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="text-[11px] text-txt-dim leading-relaxed">
+                            章节节奏、黄金三章拆解和可借鉴写法会在后续版本补充。
+                        </div>
+                    </div>
+                    <div v-else class="bg-subtle p-4 rounded-lg border border-border-dim text-center text-xs text-txt-dim">
+                        选中一本书后，这里会显示作者向摘要
+                    </div>
                 </div>
             </div>
         </div>
