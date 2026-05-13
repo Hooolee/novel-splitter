@@ -1,0 +1,5 @@
+# 敏感凭据文件，禁止提交
+account.env
+
+# macOS 系统文件
+.DS_Store
