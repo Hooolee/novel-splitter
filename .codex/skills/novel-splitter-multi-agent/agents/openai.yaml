@@ -1,0 +1,4 @@
+interface:
+  display_name: "Novel Splitter Multi-Agent"
+  short_description: "Run the repo-specific multi-agent dev workflow."
+  default_prompt: "Use $novel-splitter-multi-agent to orchestrate this novel-splitter task with planner, UI, frontend, backend, and tester agents."

@@ -1,0 +1,46 @@
+{
+  "goal": "完成一个跨前后端的功能改动，并通过统一验收。",
+  "scope": [
+    "前端展示与交互",
+    "后端命令、数据流或聚合逻辑",
+    "必要时补充 UI spec 与高真稿"
+  ],
+  "constraints": [
+    "前后端职责清晰，尽量分离写入范围",
+    "数据库驱动为主路径",
+    "UI 中文优先",
+    "如包含高真稿，必须输出到 output/ui-高真/ 并附 measurable design specs",
+    "不要在没有协议的情况下让前端猜后端数据形状"
+  ],
+  "write_scope": [
+    "src/**",
+    "src-tauri/src/**",
+    "src-tauri/capabilities/**",
+    "output/ui-高真/**"
+  ],
+  "inputs": [
+    "相关前端源码",
+    "相关后端源码",
+    "Planner 的任务拆解与验收标准",
+    "如有，UI Designer 的 spec / mockup / design tokens"
+  ],
+  "deliverables": [
+    "前端改动",
+    "后端改动",
+    "如有，UI spec 与 mockup",
+    "前后端契约说明",
+    "Tester 验收报告"
+  ],
+  "verification": [
+    "cargo check",
+    "cargo test",
+    "npm run build",
+    "必要时 task-specific manual verification"
+  ],
+  "done_criteria": [
+    "前后端行为一致",
+    "UI 与数据契约一致",
+    "验证通过或剩余风险明确",
+    "最终可以由 orchestrator 向用户汇报"
+  ]
+}

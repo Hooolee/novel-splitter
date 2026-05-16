@@ -1,0 +1,42 @@
+{
+  "goal": "优化某个前端页面或组件，并在需要时补一版高真稿。",
+  "scope": [
+    "页面结构、信息层级、交互状态、中文文案、视觉规范",
+    "如需要，高真稿输出到 output/ui-高真/"
+  ],
+  "constraints": [
+    "保持中文优先",
+    "保持数据库驱动视图逻辑",
+    "不要发明后端 API",
+    "高真稿必须配 measurable design specs",
+    "前端实现尽量将重复视觉值落为 token、常量或共享样式"
+  ],
+  "write_scope": [
+    "src/**",
+    "output/ui-高真/**"
+  ],
+  "inputs": [
+    "相关页面或组件源码",
+    "现有交互流程",
+    "当前数据库驱动的数据展示约束",
+    "如有，已有 UI spec 或用户提供参考图"
+  ],
+  "deliverables": [
+    "UI spec",
+    "如需要，高真稿图片路径",
+    "design_tokens",
+    "acceptance_checks",
+    "前端代码改动列表",
+    "验证结果"
+  ],
+  "verification": [
+    "npm run build",
+    "必要时人工比对 UI spec / mockup"
+  ],
+  "done_criteria": [
+    "页面行为符合需求",
+    "UI spec 可被前端与 QA 直接使用",
+    "如有高真稿，其路径位于 output/ui-高真/",
+    "前端构建通过"
+  ]
+}

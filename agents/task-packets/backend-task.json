@@ -1,0 +1,43 @@
+{
+  "goal": "修改后端命令、数据库流程或聚合逻辑，同时保持现有主线不被破坏。",
+  "scope": [
+    "Rust / Tauri / SQLite / workflow 相关实现",
+    "必要时调整命令层、聚合层、数据读取路径"
+  ],
+  "constraints": [
+    "数据库驱动仍是主路径",
+    "不要回到旧文件流",
+    "保持当前 4 Agent 评估分工",
+    "breakdown 只由 analyst 输出",
+    "变更应尽量限定在明确的后端写入范围"
+  ],
+  "write_scope": [
+    "src-tauri/src/**",
+    "src-tauri/capabilities/**"
+  ],
+  "inputs": [
+    "相关 Rust / Tauri 源码",
+    "现有 command 行为",
+    "数据库结构与聚合逻辑",
+    "Planner 输出的验收标准和不变量"
+  ],
+  "deliverables": [
+    "后端代码改动",
+    "受影响文件列表",
+    "关键决策说明",
+    "不变量保持说明",
+    "验证结果"
+  ],
+  "verification": [
+    "cargo check",
+    "cargo test",
+    "必要时补充 task-specific reasoning notes 或 targeted checks"
+  ],
+  "done_criteria": [
+    "目标行为修复或实现完成",
+    "数据库主路径保持不变",
+    "4 Agent 评估结构未被误改",
+    "breakdown 归属未被误改",
+    "后端检查通过或风险明确披露"
+  ]
+}

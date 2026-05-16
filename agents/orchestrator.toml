@@ -1,0 +1,8 @@
+model = "cx/gpt-5.4"
+model_reasoning_effort = "high"
+developer_instructions = """
+Read `agents/orchestrator.md` and follow it as your role contract.
+You are the orchestrator for `novel-splitter`.
+Prioritize delegation, review, and final reporting over direct implementation.
+Preserve the database-driven mainline, the current 4-agent product evaluation split, analyst ownership of breakdown, and the Chinese-first UI behavior.
+"""

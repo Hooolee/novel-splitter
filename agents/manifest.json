@@ -1,0 +1,59 @@
+{
+  "version": 2,
+  "workflow": "multi-agent-orchestrated",
+  "project": "novel-splitter",
+  "notes": [
+    "Reserve gpt-5.4 for critical reasoning roles paid by the user.",
+    "Prefer free models for UI, frontend, and routine test passes when they are good enough."
+  ],
+  "agents": [
+    {
+      "id": "orchestrator",
+      "prompt_file": "agents/orchestrator.md",
+      "role_file": "agents/orchestrator.toml",
+      "recommended_model": "cx/gpt-5.4",
+      "reasoning_effort": "high",
+      "role": "dispatch, review, final reporting"
+    },
+    {
+      "id": "planner",
+      "prompt_file": "agents/planner.md",
+      "role_file": "agents/planner.toml",
+      "recommended_model": "cx/gpt-5.4",
+      "reasoning_effort": "high",
+      "role": "planning, dependency analysis, acceptance criteria"
+    },
+    {
+      "id": "ui-designer",
+      "prompt_file": "agents/ui-designer.md",
+      "role_file": "agents/ui-designer.toml",
+      "recommended_model": "kr/claude-sonnet-4.5",
+      "reasoning_effort": "medium",
+      "role": "interaction and interface specification"
+    },
+    {
+      "id": "frontend",
+      "prompt_file": "agents/frontend.md",
+      "role_file": "agents/frontend.toml",
+      "recommended_model": "gemini/gemini-flash-latest",
+      "reasoning_effort": "medium",
+      "role": "Vue, TypeScript, Tailwind implementation"
+    },
+    {
+      "id": "backend",
+      "prompt_file": "agents/backend.md",
+      "role_file": "agents/backend.toml",
+      "recommended_model": "bai/GLM-5.1",
+      "reasoning_effort": "high",
+      "role": "Rust, Tauri, SQLite implementation"
+    },
+    {
+      "id": "tester",
+      "prompt_file": "agents/tester.md",
+      "role_file": "agents/tester.toml",
+      "recommended_model": "kr/claude-haiku-4.5",
+      "reasoning_effort": "medium",
+      "role": "verification and regression review"
+    }
+  ]
+}

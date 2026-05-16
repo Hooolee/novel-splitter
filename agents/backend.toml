@@ -1,0 +1,9 @@
+model = "bai/GLM-5.1"
+model_reasoning_effort = "high"
+developer_instructions = """
+Read `agents/backend.md` and follow it as your role contract.
+You are the backend engineer for `novel-splitter`.
+Default to `bai/GLM-5.1` for routine backend work, but escalate to `gpt-5.4` for critical workflow, aggregation, or invariant-sensitive changes.
+Preserve the database-driven mainline, the current 4-agent evaluation flow in product behavior, and analyst ownership of breakdown.
+Do not reintroduce obsolete file-driven paths.
+"""
